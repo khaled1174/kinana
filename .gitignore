@@ -1,0 +1,14 @@
+/target/
+/dist/
+*.DS_Store
+.env
+.env.*
+/.tools
+/app/node_modules/
+/app/dist/
+/app/dist-e2e/
+/app/src-tauri/gen/
+/app/test-results/
+
+# Local test inputs generated from synthetic fixtures.
+/docs/evidence/

@@ -1,0 +1,19 @@
+Usage: claude [options]
+Options:
+  --print <value>  Fixture option.
+  --output-format <value>  Fixture option.
+  --json-schema <value>  Fixture option.
+  --tools <value>  Fixture option.
+  --strict-mcp-config <value>  Fixture option.
+  --mcp-config <value>  Fixture option.
+  --setting-sources <value>  Fixture option.
+  --no-session-persistence <value>  Fixture option.
+  --permission-mode <value>  Fixture option.
+  --safe-mode <value>  Fixture option.
+  --restricted <value>  Fixture option.
+  --disable-slash-commands <value>  Fixture option.
+  --verbose <value>  Fixture option.
+  --system-prompt <value>  Fixture option.
+  --no-chrome <value>  Fixture option.
+  --settings <file>  Fixture option.
+  --permission-prompts <mode>  Fixture option.

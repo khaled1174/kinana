@@ -1,0 +1,4 @@
+/* e2e-only-csp-self-probe */
+window.__kinanaTrustedSelfLoaded = true;
+const target=document.currentScript?.dataset.target;
+if(target)fetch(target).then(()=>{window.__kinanaProbeFetchSucceeded=true;}).catch(()=>{window.__kinanaProbeFetchRejected=true;});

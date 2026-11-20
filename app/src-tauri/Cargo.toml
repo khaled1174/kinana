@@ -1,0 +1,24 @@
+[package]
+name = "kinana-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+custom-protocol = ["tauri/custom-protocol"]
+e2e = ["dep:tauri-plugin-wdio-webdriver", "dep:tauri-plugin-wdio"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.4", features = [] }
+
+[dependencies]
+kinana-core = { path = "../../crates/core" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "=2.12.5", features = [] }
+tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
+tauri-plugin-wdio = { version = "=1.5.1", optional = true }
+tauri-plugin-dialog = "=2.8.4"
+tauri-plugin-opener = "=2.7.3"

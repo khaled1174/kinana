@@ -1,0 +1,24 @@
+[package]
+name = "kinana"
+default-run = "kinana"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+kinana-core = { path = "../core" }
+serde_json.workspace = true
+[dev-dependencies]
+rusqlite.workspace = true
+toml.workspace = true
+zip.workspace = true
+
+[[bin]]
+name = "kinana"
+path = "src/main.rs"
+
+[[bin]]
+name = "skillsbox"
+path = "src/compat.rs"

@@ -1,0 +1,24 @@
+{
+  "build": {
+    "frontendDist": "../dist-e2e",
+    "beforeBuildCommand": "npm run build:e2e"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        "main",
+        {
+          "identifier": "e2e",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "wdio:default",
+            "core:window:allow-set-focus"
+          ]
+        }
+      ]
+    }
+  }
+}

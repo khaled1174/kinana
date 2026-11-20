@@ -1,0 +1,13 @@
+{
+  "claude_version": "2.1.319",
+  "model": "claude-fable-5-1",
+  "source_log": "docs/evidence/phase-3-repair/claude-model-1.stdout.txt",
+  "input_tokens": 2,
+  "cache_creation_input_tokens": 1567,
+  "cache_read_input_tokens": 4122,
+  "total_input_tokens": 5691,
+  "prompt_utf8_bytes": 2202,
+  "estimated_prompt_tokens": 551,
+  "cli_overhead_tokens": 5140,
+  "prompt_sha256": "584bd1de8974364ed952d7b901acf48dcdff3a43496e58941c38449d807eb7c6"
+}

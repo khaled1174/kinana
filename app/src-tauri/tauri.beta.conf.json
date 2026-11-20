@@ -1,0 +1,24 @@
+{
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 khaled1174 and Kinana contributors",
+    "shortDescription": "Local Agent Skills vault — Apple Silicon beta",
+    "icon": [
+      "icons/icon.png"
+    ],
+    "resources": {
+      "../../LICENSE": "LICENSE"
+    },
+    "externalBin": [
+      "binaries/kinana"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "27.0",
+      "hardenedRuntime": true
+    }
+  }
+}

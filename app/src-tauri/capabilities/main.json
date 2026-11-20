@@ -1,0 +1,11 @@
+{
+  "identifier": "main",
+  "description": "Local catalog window; native file selection only. No opener permissions.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}
