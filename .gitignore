@@ -9,6 +9,3 @@
 /app/dist-e2e/
 /app/src-tauri/gen/
 /app/test-results/
-
-# Local test inputs generated from synthetic fixtures.
-/docs/evidence/

@@ -914,6 +914,7 @@ fn groups_are_readonly_proposals_and_both_review_decisions_preserve_overlaps() {
                 .into(),
             overlaps_with: vec![overlap.into()],
             confidence: 0.9,
+            category_reason: String::new(),
         });
         assert!(
             edit::apply(

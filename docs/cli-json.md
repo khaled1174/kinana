@@ -2,7 +2,7 @@
 
 هذا عقد الأوامر المنفذة حتى المرحلة6.2 (الجزء المنفذ) وفق §4 من SPEC.md. تعتمد عليه مهارة الموجّه والواجهة. الأوامر المخططة لمراحل لاحقة ليست جزءًا منه. تغيير مفاتيح أو أنواع هنا يتطلب تعديلًا صريحًا للعقد واختباراته.
 
-مع `--json` تكتب العملية قيمة JSON واحدة إلى stdout ثم سطرًا جديدًا، دون نص بشري قبله أو بعده. قد تكتب تحذيرًا إلى stderr، بما فيه تحذير الرجوع إلى الكلمات المفتاحية عند فشل Claude. افحص رمز الخروج قبل استخدام التقرير. ترتيب مفاتيح الكائنات غير مضمون؛ ترتيب القوائم تابع لمعنى الأمر. المسارات والتجزئات والتواريخ والمعرّفات ورسائل العرض قيم متغيرة، وتُمثل بنصوص. لا تستنتج الملكية من قيمة مسار أو تجزئة في التقرير.
+مع `--json` تكتب العملية قيمة JSON واحدة إلى stdout ثم سطرًا جديدًا، دون نص بشري قبله أو بعده. قد تكتب تحذيرًا إلى stderr. افحص رمز الخروج قبل استخدام التقرير. ترتيب مفاتيح الكائنات غير مضمون؛ ترتيب القوائم تابع لمعنى الأمر. المسارات والتجزئات والتواريخ والمعرّفات ورسائل العرض قيم متغيرة، وتُمثل بنصوص. لا تستنتج الملكية من قيمة مسار أو تجزئة في التقرير.
 
 | الأمر مع `--json` | مخطط الناتج في `$defs` |
 | --- | --- |
@@ -17,6 +17,7 @@
 | `suggest` | `Suggest` |
 | `classify` | `Classify` |
 | `review` | `Review` |
+| `review <id> <id>... --accept [--confirm <token>]` | `BatchReview` |
 | `build` | `Build` |
 | `groups` | `Groups` |
 | `use` | `Use` |
@@ -80,7 +81,7 @@ FileDiff يعلن نوع وحجم وصلاحيات وتجزئة الطرفين،
 
 Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا قائمًا تغيّر مصدره؛ يُمسح عند المراجعة أو إنشاء نتيجة تصنيف جديدة. Source.tracking_ref وtracking_kind اختياريان، والغياب يحفظ توافق metadata القديمة دون تخمين. LockedSkill.target_root اختياري ومقيد بمسار الوكيل الثابت؛ Cursor القديم دون الحقل يبقى في .cursor/skills، والجديد يحمل .agents/skills. generation_hash اختياري لتجزئة الجيل بما يشمل صلاحيات الملفات؛ غيابه يبقي تحقق القفل القديم بالمحتوى. لا يجيز أي حقل مسارًا عامًا أو حذفًا دون الملكية. تظهر ثلاثة تفعيلات منطقية عند all في وجهتين ماديتين فقط.
 
-المخطط التالي JSON Schema Draft 2020-12. استخرج محتوى السياج بين العلامتين؛ `x-commands` يختار مخطط الأمر و`x-error` مخطط الأخطاء. `x-contract-version` نسخة هذا المستند، وليس حقلًا مضافًا إلى تقارير CLI. `x-released-in` الإصدار الذي شُحنت فيه هذه النسخة: **النسخة 8 هي عقد الإصدار 0.2.0 ومثبتة عنده** (قرار المالك، الجولة الثامنة)؛ أي تغيير في المفاتيح أو الأنواع بعده نسخة 9. الاختبار يطابق `x-released-in` مع إصدار الحزمة، فرفع الإصدار يستلزم مراجعة العقد صراحة. الاختبار `crates/cli/tests/json_contract.rs` يقرأ هذا النص نفسه، يتحقق من جرد الأوامر، ويقارن المفاتيح والأنواع على مخرجات عمليات حقيقية. لا يُولّد المخطط من نماذج Rust.
+المخطط التالي JSON Schema Draft 2020-12. استخرج محتوى السياج بين العلامتين؛ `x-commands` يختار مخطط الأمر و`x-error` مخطط الأخطاء. `x-contract-version` نسخة هذا المستند، وليس حقلًا مضافًا إلى تقارير CLI. `x-released-in` الإصدار الذي شُحنت فيه هذه النسخة: **النسخة 8 هي عقد الإصدار 0.2.0 ومثبتة عنده** (قرار المالك، الجولة الثامنة)؛ عقد 0.3 الأول نسخة 9، وإضافة `skipped` في المرشح المحدّث نسخة 10. الاختبار يطابق `x-released-in` مع إصدار الحزمة، فرفع الإصدار يستلزم مراجعة العقد صراحة. الاختبار `crates/cli/tests/json_contract.rs` يقرأ هذا النص نفسه، يتحقق من جرد الأوامر، ويقارن المفاتيح والأنواع على مخرجات عمليات حقيقية. لا يُولّد المخطط من نماذج Rust.
 
 <!-- cli-json-contract:start -->
 ```json
@@ -88,6 +89,7 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "x-contract-version": 8,
   "x-released-in": "0.2.0",
+  "x-current-release": { "contract": 11, "released-in": "0.3.0" },
   "x-commands": {
     "init": {
       "$ref": "#/$defs/Init"
@@ -164,6 +166,9 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
     "undo": {
       "$ref": "#/$defs/Undo"
     },
+    "refresh-audit": {
+      "$ref": "#/$defs/RefreshAudit"
+    },
     "help": {
       "$ref": "#/$defs/Help"
     },
@@ -234,6 +239,80 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         "changed",
         "built",
         "committed"
+      ],
+      "additionalProperties": false
+    },
+    "RefreshAudit": {
+      "type": "object",
+      "properties": {
+        "rules_version": {
+          "type": "integer"
+        },
+        "older": {
+          "type": "integer"
+        },
+        "raised": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LevelChange"
+          }
+        },
+        "lowered": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LevelChange"
+          }
+        },
+        "unchanged": {
+          "type": "integer"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "preview_token": {
+          "type": "string"
+        },
+        "requires_confirmation": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "committed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rules_version",
+        "older",
+        "raised",
+        "lowered",
+        "unchanged",
+        "changed",
+        "preview_token",
+        "requires_confirmation",
+        "dry_run",
+        "committed"
+      ],
+      "additionalProperties": false
+    },
+    "LevelChange": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to"
       ],
       "additionalProperties": false
     },
@@ -594,6 +673,12 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
               "type": "null"
             }
           ]
+        },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -652,6 +737,9 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           "items": {
             "type": "string"
           }
+        },
+        "category_reason": {
+          "type": "string"
         }
       },
       "required": [
@@ -704,6 +792,9 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         },
         "proposal_source_changed": {
           "type": "boolean"
+        },
+        "classification_context": {
+          "$ref": "#/$defs/ClassificationContext"
         }
       },
       "required": [
@@ -1313,6 +1404,12 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           "items": {
             "type": "string"
           }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderStatus"
+          }
         }
       },
       "required": [
@@ -1411,6 +1508,45 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         },
         "stopped": {
           "$ref": "#/$defs/ClassifyStop"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderStatus"
+          }
+        },
+        "skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "agent": { "type": "string" },
+              "reason_code": { "type": "string" },
+              "attempts": { "type": "integer" }
+            },
+            "required": ["id", "agent", "reason_code", "attempts"],
+            "additionalProperties": false
+          }
+        },
+        "pi_confirmation": {
+          "$ref": "#/$defs/PiConfirmation"
+        },
+        "auto_approved": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "commit": {
+              "type": "string"
+            }
+          },
+          "required": ["ids", "commit"],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3279,6 +3415,144 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           }
         }
       }
+    },
+    "BatchReview": {
+      "type": "object",
+      "properties": {
+        "decision": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BatchReviewItem"
+          }
+        },
+        "preview_token": {
+          "type": "string"
+        },
+        "requires_confirmation": {
+          "type": "boolean"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "build": {
+          "$ref": "#/$defs/Build"
+        }
+      },
+      "required": [
+        "decision",
+        "items",
+        "preview_token",
+        "requires_confirmation",
+        "dry_run",
+        "committed",
+        "build"
+      ],
+      "additionalProperties": false
+    },
+    "BatchReviewItem": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "original": {
+          "type": "string"
+        },
+        "current": {
+          "type": "string"
+        },
+        "proposed": {
+          "type": "string"
+        },
+        "active": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "original",
+        "current",
+        "proposed",
+        "active"
+      ],
+      "additionalProperties": false
+    },
+    "ClassificationContext": {
+      "type": "object",
+      "properties": {
+        "prompt_version": {
+          "type": "integer"
+        },
+        "category_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_version",
+        "category_reason"
+      ],
+      "additionalProperties": false
+    },
+    "PiConfirmation": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_default": {
+          "type": "boolean"
+        },
+        "skills": {
+          "type": "integer"
+        },
+        "max_calls": {
+          "type": "integer"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "model_default",
+        "skills",
+        "max_calls",
+        "token"
+      ],
+      "additionalProperties": false
+    },
+    "ProviderStatus": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "planned_calls": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent",
+        "status",
+        "planned_calls"
+      ],
+      "additionalProperties": false
     }
   }
 }
@@ -3309,7 +3583,7 @@ cargo test --locked -p kinana --test json_contract
 
 ## حذف مهارة أو حزمة — عقد إصدار5
 
-إشارات أقسام الإصدارات 5 إلى 8 إلى SPEC.md تعني النص بعد تطبيق phase-8-spec-proposal.diff، وهو مقترح لم يعتمده المالك بعد ولم يُطبَّق على SPEC.md.
+إشارات أقسام الإصدارات 5 إلى 8 إلى SPEC.md تعني النص بعد تطبيق [phase-8-spec-proposal.diff](phase-8-spec-proposal.diff)، وهو مقترح لم يعتمده المالك بعد ولم يُطبَّق على SPEC.md.
 
 الإصدار5 يضيف عقدي `remove` و`bundle delete` صراحةً وفق §5.7 من SPEC.md، دون تغيير أي شكل قائم. هما الأمران الوحيدان اللذان يحذفان من المخزن، ولا يكتبان في أي مشروع أو ملف قفل.
 
@@ -3421,7 +3695,7 @@ cargo test --locked -p kinana --test json_contract
 - **حد طول النصوص وميزانية الصفحة:** `role` و`when_to_use` و`when_not` و`description` و`title` الحزمة تُقص إلى 200 حرف. مصفوفتا `skills` و`bundles` معًا لا تتجاوزان 1,100 بايت من JSON المضغوط لكل مهارة يسمح بها `limit`. إذا لم تتسع الحزم كاملة بجوار المهارات بنصها الكامل، تُعرض بالاسم وعدد الأعضاء فقط ويُضاف ذلك إلى `hint` مع `kinana bundle show <name>`. ثم إذا لم تتسع المهارات بجوارها، والحزم محسوبة بربع الميزانية على الأكثر، تُقص نصوص المهارات كلها إلى 120 حرفًا ثم إلى 60، ويُضاف إلى `hint` أن النص قُص وأن `kinana show <id>` يعرضه كاملًا. وأخيرًا تُعرض من الحزم بترتيب الاسم ما يتسع في الباقي، ويذكر `hint` كم عُرض من `bundles_total` وأن `kinana bundle list` يعرضها كلها. مهارات الصفحة وترتيبها وعدد الصفحات لا تتغير. `category` يُقص كذلك، و`stack` و`stage` لا يحملان إلا قيم قائمتيهما في `box.toml`، كل قيمة مرة واحدة بترتيب القائمة. المعرّف واسم الحزمة لا يُقصان ولا حد لطولهما، وكذلك قيم `stack` و`stage` المسموحة نفسها في `box.toml` (لا حد لعددها ولا لطولها، والمكرر منها يُعرض مرة واحدة)؛ فهذه وحدها قد تتجاوز الميزانية: صفحة معرّفاتها أو قيمها المسموحة طويلة جدًا تتجاوز الحد بقدر ما زادت عليه، والمحرك لا يحذف مهارة من الصفحة لذلك. لا يُحوَّل حقل بغير القص وحذف محارف التحكم (البند التالي). الحرف هنا Unicode scalar، فالقص لا يشطر حرفًا لكنه قد يفصل علامة تشكيل عن حرفها.
 - **كل النصوص بيانات** كتبها مؤلفو المهارات والحزم أو المصنّف، وليست تعليمات للعميل. تُحذف من كل نص في JSON محارف التحكم (فئة Unicode `Cc`، ومنها C1) وتسلسلات الطرفية كاملة: CSI (`ESC [` إلى حرفه الأخير) وOSC (`ESC ]` إلى BEL أو `ESC \`) والتسلسل ذو الحرفين، ويصير فاصل السطر (LF وCR وVT وFF وNEL) وTab مسافة. محارف U+2028 وU+2029 ومحارف الاتجاه ليست محارف تحكم فتبقى في JSON. الناتج النصي بلا `--json` سطر `Skills: N of T (page P of Q)` ثم سطر لكل مهارة (`id` ثم المجال ثم `stack=` و`stage=` و`role=` و`use=` و`not=` و`desc=` يفصلها Tab)، ثم `Bundles: M of N` وسطر لكل حزمة (`name` ثم `title` ثم الأعضاء، أو `name` ثم `members=<عدد>` في العرض المختصر)، ثم سطر `Hint: ...` إن وُجدت رسالة؛ تُستبدل فيه بمسافة محارف التحكم وU+2028 وU+2029 ومحارف فرض الاتجاه U+202A–U+202E وU+2066–U+2069. شكل الناتج النصي للعرض وليس عقدًا.
 
-الحجم المقاس على مخزن اختبار من 200 مهارة مصنفة بالوكيل و8 حزم، بتقدير `ceil(bytes / 4)` للتوكنات: قبل حد الصفحة كان الرد بلا مرشح 178,518 بايتًا (نحو 44,630 توكنًا)؛ بعده وبعد حد طول النصوص الصفحة الافتراضية 20,912 بايتًا (نحو 5,228 توكنًا)، وأكبر صفحة ممكنة (`--limit 50`) 45,146 بايتًا (نحو 11,287 توكنًا)، و`--stack react` لاثنتي عشرة مهارة 14,507 بايتًا (نحو 3,627 توكنًا). بحقول من نحو 30,000 حرف في كل مهارة تبقى الصفحة الافتراضية 13,674 بايتًا (نحو 3,419 توكنًا) وأكبر صفحة 33,814 بايتًا (نحو 8,454 توكنًا). ومع 300 حزمة بأسماء طويلة وستين عضوًا في كل منها، الصفحة الافتراضية نحو 5,618 توكنًا وفيها 29 حزمة بالاسم والعدد، وأكبر صفحة نحو 13,826 توكنًا وفيها 72. التفصيل وشروط القياس في §4 من المقترح phase-8-spec-proposal.diff. ضيّق بالمرشحات قبل طلب صفحة تالية.
+الحجم المقاس على مخزن اختبار من 200 مهارة مصنفة بالوكيل و8 حزم، بتقدير `ceil(bytes / 4)` للتوكنات: قبل حد الصفحة كان الرد بلا مرشح 178,518 بايتًا (نحو 44,630 توكنًا)؛ بعده وبعد حد طول النصوص الصفحة الافتراضية 20,912 بايتًا (نحو 5,228 توكنًا)، وأكبر صفحة ممكنة (`--limit 50`) 45,146 بايتًا (نحو 11,287 توكنًا)، و`--stack react` لاثنتي عشرة مهارة 14,507 بايتًا (نحو 3,627 توكنًا). بحقول من نحو 30,000 حرف في كل مهارة تبقى الصفحة الافتراضية 13,674 بايتًا (نحو 3,419 توكنًا) وأكبر صفحة 33,814 بايتًا (نحو 8,454 توكنًا). ومع 300 حزمة بأسماء طويلة وستين عضوًا في كل منها، الصفحة الافتراضية نحو 5,618 توكنًا وفيها 29 حزمة بالاسم والعدد، وأكبر صفحة نحو 13,826 توكنًا وفيها 72. التفصيل وشروط القياس في §4 من المقترح [phase-8-spec-proposal.diff](phase-8-spec-proposal.diff). ضيّق بالمرشحات قبل طلب صفحة تالية.
 
 **`init --install-router`:** `RouterTarget` يضيف `action: string` حاضرًا دائمًا:
 
@@ -3465,3 +3739,129 @@ cargo test --locked -p kinana --test json_contract
 **اقتراح الوكيل المنتظر:** `stack` و`stage` يبقيان في `metadata.proposal` في JSON كما وُثّقا في إصدار6. تخزينهما في ملف meta صار في جدول `[proposal_dimensions]` بجوار `[proposal]`، حتى يقرأ بيتا 0.1.0 المخزن والاقتراح منتظر (§3 من SPEC.md). الجدول ليس جزءًا من أي ناتج JSON.
 
 يحسب التصنيف تكلفة سياق التداخل لكل مهارة بحسب فئتها. يعرض `fixed_tokens_total` مجموع تكاليف الطلبات و`fixed_tokens_per_call` متوسطها مقربًا للأعلى.
+
+## نسخة 0.3 — عقد إصدار9
+
+يشحن 0.3.0 عقد إصدار9. يحدد `x-current-release` الإصدار والعقد الحاليين، ويبقى المخطط الأساس لإصدار8 مثبتًا على 0.2.0. اعتمد المالك الإضافات في 2026-11-19. لا تُحذف مفاتيح قائمة ولا يتغير نوعها إلا حيث يُذكر صراحة. نص SPEC المقابل مطبَّق على SPEC.md (الدفعات 1–4).
+
+**الدفعة 1 — `review <id> <id>... --accept [--confirm <token>]`** يعيد `BatchReview`: `decision` (`"accept"`)، و`items` بترتيب المعرّفات كما مُررت، لكل عنصر `id` و`original` (وصف SKILL.md) و`current` (الوصف النشط قبل الاعتماد) و`proposed` و`active` (بعد التنفيذ `improved`)، و`preview_token` بصيغة `r1.<64 hex>` لا يتغير بترتيب المعرّفات، و`requires_confirmation` و`dry_run` و`committed` و`build`.
+
+| الحالة | رمز الخروج | الكتابة |
+| --- | --- | --- |
+| بدون `--confirm` | 2، `requires_confirmation: true` | لا شيء |
+| بدون `--confirm` مع `--dry-run` | 0 | لا شيء |
+| `--confirm` مطابق مع `--dry-run` | 0، `requires_confirmation: false` | لا شيء |
+| `--confirm` مطابق | 0، `committed: true` | commit واحد يُتراجع عنه بـ`undo` |
+| رمز لا يطابق الحالة الحالية | `REVIEW_PREVIEW_CHANGED` برمز2 | لا شيء |
+| مهارة بلا اقتراح | `NO_DESCRIPTION_PROPOSAL` برمز2، والرسالة تذكر المعرّف | لا شيء |
+| اقتراح للمصدر السابق | `PROPOSAL_SOURCE_CHANGED` برمز2 | لا شيء |
+| تكرار، أو أكثر من 200، أو عدة معرّفات بلا `--accept` | `INVALID_ARGUMENTS` برمز1 | لا شيء |
+
+معرّف واحد بلا `--confirm` يبقى بعقد `Review` السابق دون تغيير. معرّف واحد مع `--confirm` يتبع `BatchReview`.
+
+**الدفعة 2 — جودة التصنيف:**
+
+- `Proposal.category_reason` (`string`، اختياري): سبب اختيار التصنيف من الوكيل، 160 حرفًا كحد أقصى. يغيب عن الاقتراحات الأقدم. يُخزَّن في `[proposal_dimensions]` بجوار `[proposal]`، لا داخله.
+- `Metadata.classification_context` (`ClassificationContext`، اختياري): `prompt_version` (`integer`؛ القالب الذي أُرسل: 1 بالأسماء فقط، وهو ما يرسله المنتج حتى تنجح بوابة التقييم، و2 مع التعريفات) و`category_reason`. يغيب بعد تصنيف الكلمات المفتاحية، وللتصنيفات الأقدم من 0.3، وحين يتغير التصنيف الذي كُتب له (تعديل التصنيف، أو إعادة تصنيف من نسخة لا تعرف الجدول). يُخزَّن في `[classification_context]` مع تجزئة `binds` لا تظهر في JSON.
+- مخطط رد الوكيل صار 11 حقلًا: `category_reason` إلزامي، `maxLength` 160. رد بدونه `INVALID_AGENT_PROPOSAL` كأي حقل ناقص.
+- رموز جديدة عند حفظ الإعدادات وقبل أي استدعاء تصنيف: `INVALID_DEFINITION` و`UNKNOWN_DEFINITION_KEY` و`DEFINITIONS_TOO_LARGE`، كلها برمز1 وبلا كتابة.
+
+**الدفعة 3 — Codex وسلوك `auto`:**
+
+| الطلب | السابق (0.2) | 0.3 |
+| --- | --- | --- |
+| `classify --agent codex` (مع `--dry-run` أو بدونه) | تصنيف بالكلمات المفتاحية مع `AGENT_CODEX_UNSUPPORTED` تحذيرًا، رمز0 | خطأ `AGENT_CODEX_UNSUPPORTED` برمز2 قبل أي قراءة أو كتابة أو استدعاء. الرمز هو العقد؛ `message` نص إنجليزي ثابت لـCLI («Codex is not supported for classification: Kinana cannot guarantee that it does not read files on this computer. …»)، والواجهة تترجم الرمز ولا تعرض الرسالة |
+| `classify` بلا `--agent` (`auto`) | كلمات مفتاحية مع `AGENT_CODEX_UNSUPPORTED` | (أ) Claude غير موجود على الجهاز (`AGENT_EXECUTABLE_NOT_FOUND`، أو `AGENT_PLATFORM_UNSUPPORTED`): مع Pi مفعّل يذهب إلى Pi بعد تأكيده (`PI_CONFIRMATION_REQUIRED` أولًا، بلا تشغيل ولا كتابة قبله)، وإخفاق Pi بعده توقف بـ`AGENT_AUTO_UNAVAILABLE` لا كلمات مفتاحية (تصحيح المالك 2026-11-18). مع Pi غير مفعّل: يتوقف التشغيل برمز2، والسبب في `stopped.providers`. `claude` موجود لكنه لا يجتاز شروط الثقة (داخل المخزن أو مصدر، أو مجلد يكتب فيه غيرك، أو لا يوجد إلا خلف مدخل نسبي في `PATH`) يُبلَّغ بـ`AGENT_EXECUTABLE_UNTRUSTED` ويُعامل كالحالة (ب)، لا (أ)، ولا يُشغَّل. وClaude أجاب في التشغيل ثم اختفى يتبع (ب) كذلك. (ب) Claude موجود ولم ينجح (الثقة، أو العزل، أو القدرات، أو إيقاف بحد الاستخدام أو الرصيد أو الدخول): Pi إذا كان مفعّلًا، وإلا يتوقف التشغيل: `stopped.reason_code = "AGENT_AUTO_UNAVAILABLE"` ورمز2، والمهارات المكتملة قبلها محفوظة في commit واحد، وهذه المهارة والباقي بلا أي كتابة. بعد إيقاف Claude لا يُستدعى من جديد في التشغيل نفسه |
+| `--agent claude` | Claude، ثم كلمات مفتاحية بسبب ظاهر | لا يتحول أبدًا للكلمات المفتاحية: إخفاق المزوّد، ومنه غياب Claude، يوقف التشغيل بـ`stopped.reason_code = "AGENT_CLAUDE_UNAVAILABLE"` ورمز2 و`stopped.providers` بالسبب. المكتمل محفوظ والباقي بلا كتابة. الإيقاف بحد الاستخدام أو الرصيد أو الدخول يبقى برمزه (`AGENT_USAGE_LIMIT` أو `AGENT_CREDIT_EXHAUSTED` أو `AGENT_NOT_LOGGED_IN`)، ورمز الخروج2، و`stopped.providers` يذكر المزوّد `failed` بالرمز نفسه (2026-11-18). ينطبق على `--agent pi` كذلك |
+| `--agent keywords` | — | الطريق الوحيد للكلمات المفتاحية |
+
+- `Classify.providers` (`ProviderStatus[]`، يغيب مع `keywords`): المزوّدون بالترتيب. لكل واحد `agent` و`status` (`planned` أو `failed` أو `disabled` أو `unsupported`) و`reason_code` الاختياري و`planned_calls`. مع `auto`: Claude `planned`، ثم Codex `unsupported` بـ`AGENT_CODEX_UNSUPPORTED` و0 استدعاءات.
+- `ClassifyStop.providers` (يظهر مع `AGENT_AUTO_UNAVAILABLE`): الحالة نفسها، وClaude `failed` (و`planned_calls` فيه خطة الدفعة كما عُرضت، لا الاستدعاءات الفعلية؛ الفعلية في `agent_calls`) مع رمز سبب إخفاقه، مثل `AGENT_EXECUTABLE_NOT_FOUND` أو `AGENT_CAPABILITY_UNPROVEN` أو `AGENT_TOOLS_NOT_ISOLATED`.
+- `estimated_agent_calls` يحسب استدعاءات Claude مع `auto` أيضًا، فتأكيد الدفعة (`--yes`) يُطلب كما مع `claude`.
+- `Classify.skipped` (العقد 10): يظهر إن بقيت مهارات دون تصنيف بسبب `INVALID_AGENT_PROPOSAL` بعد المحاولة الثانية أو `AGENT_TIMEOUT`. لكل عنصر `id` و`agent` و`reason_code` و`attempts`، بالترتيب الذي عولجت به المهارات. لا يُحفظ اقتراح أو تعديل لها، وتبقى النجاحات في `items` وتُحفظ في commit واحد. إذا بلغ التشغيل نهايته وفيه عناصر متخطّاة، يعيد تقرير `Classify` ورمز2 دون `stopped`. إذا توقّف لاحقًا، تشمل `stopped.remaining` كل المهارات التي لم تُصنّف، ومنها المتخطّاة، و`stopped.classified` عدد المهارات التي حُفظت. تُحتسب محاولات المتخطّاة في `agent_calls`.
+- رموز `stopped.reason_code` التي يسأل بعدها المستخدم (رمز الخروج2، وزرا الاختيار في النافذة): `AGENT_AUTO_UNAVAILABLE` و`AGENT_PI_UNAVAILABLE` و`AGENT_CLAUDE_UNAVAILABLE` و`PI_CONFIRMATION_REQUIRED` و`AGENT_USAGE_LIMIT` و`AGENT_CREDIT_EXHAUSTED` و`AGENT_NOT_LOGGED_IN` و`AGENT_MODEL_UNAVAILABLE` (Pi فقط، 2026-11-19) (`STOPS_THAT_ASK` في core). `CANCELLED` يبقى برمز0. CLI يطبع تحذيرًا ثابتًا على stderr، والنافذة تعرض السبب.
+- `ClassifiedItem.attempts` صار مجموع استدعاءات المزوّدين للمهارة (Claude ثم Pi)، و`agent_calls` مجموع التشغيل كله.
+- **الإعدادات:** `classification_agent` يقبل `claude` و`auto` و`keywords`. القيمة `codex` في `box.toml` قديم تُقرأ كما هي، ويبقى حفظها ممكنًا ما دامت لم تتغير. اختيارها من جديد يُرفض بـ`AGENT_CODEX_UNSUPPORTED`.
+
+**الدفعة 4 — Pi تجريبي (مطفأ افتراضيًا):**
+
+- `classify --agent pi` جديد. مع Pi مطفأ: `AGENT_PI_DISABLED` برمز2 قبل أي قراءة أو كتابة. مع Pi مفعّل: إذا أخفق Pi على مستوى المزوّد يتوقف التشغيل بـ`stopped.reason_code = "AGENT_PI_UNAVAILABLE"` ورمز2، و`stopped.providers[0].reason_code` يذكر السبب. لا رجوع للكلمات.
+- أسباب Pi الممكنة في `reason_code`:
+  - `AGENT_VERSION_UNVERIFIED`: إصدار غير مراجَع؛ لم يُرسل له أي نص.
+  - `AGENT_PACKAGE_UNVERIFIED` (2026-11-18): ملف من ملفات الحزمة المراجَعة المثبتة تجزئاتها تغيّر أو نقص أو ليس ملفًا عاديًا، أو في الشجرة المثبتة ملف زائد، أو `pi` لا يشير إلى الملف التنفيذي المراجَع. يُفحص قبل تشغيل Pi أصلًا، حتى قبل `--version`.
+  - `PI_APPEND_SYSTEM_FILE` (2026-11-19): ملف تعليمات Pi الإضافي `APPEND_SYSTEM.md` موجود حيث يبحث عنه Pi 1.5.2 (مجلد `PI_CODING_AGENT_DIR`، وإلا `~/.pi/agent`؛ و`.pi` في مجلد العمل الفارغ)، أو تعذّر التحقق منه. يُفحص قبل تشغيل Pi أصلًا، حتى قبل `--version`، باسم المدخل وحده بلا قراءة محتواه. لم يُشغَّل Pi ولم يُرسل له أي نص. الرسالة تذكر مسار الملف وكيف يتجاوزه المستخدم (تغيير اسمه أو نقله مؤقتًا أثناء التصنيف).
+  - `AGENT_TOOLS_NOT_ISOLATED`: حدث أداة، أو كتلة `toolCall`، أو رسالة دورها غير `user` و`assistant`، أو غياب رسالة `system` الأولى أو مخالفتها (2026-11-19: هي دليل وقت التشغيل على أدوات Pi مثل `init` في Claude، فلا يمر قبل انتهائها إلا `agent_start` و`turn_start`، وسجلّ ينتهي بدونها مرفوض؛ وشرطها: مرة واحدة، بلا نص خاص، بقسمين بالضبط `preamble` مطابق لموجّه كنانة و`cwd` لمجلد Pi، و`toolsAdded` فارغ أو غائب)، أو رسالة `user` ثانية في المحاولة، أو نوع حدث غير معروف، أو `entry_appended` قيده ليس رسالة تمر بالفحص، أو `queue_update` بطابور غير فارغ، أو حقل في أحدهما لا يرسله 1.5.2، أو غياب رأس الجلسة. العملية أُوقفت فورًا بلا إعادة، والرسالة تذكر الحدث وسببه. جدول الأنواع في `docs/pi-classification-proposal.md` القسم 8.
+  - `AGENT_CONNECTION_FAILED` (2026-11-19): فشل طلب Pi إلى مزوّد الموديل فبدأ Pi إعادة المحاولة تلقائيًا (`auto_retry_start`). الرفض والإيقاف كما في `AGENT_TOOLS_NOT_ISOLATED` بالضبط: أُوقفت العملية قبل إعادتها، بلا إعادة من كنانة، ولم يُستخدم شيء مما أعاده. يتغير السبب وحده.
+  - `INVALID_AGENT_PROPOSAL` بعد محاولة إضافية واحدة، و`AGENT_TIMEOUT`: يُسجَّلان للمهارة في `skipped` عند التصنيف عبر Pi المسمّى.
+  - **أخطاء Pi المعروفة (2026-11-19):** تصير رموزًا ثابتة كرموز Claude، توقف التشغيل كله بلا إعادة ولا كتابة، ولا يظهر نص Pi الخام أبدًا (لا في JSON ولا stderr ولا النافذة). تُطابَق من `errorMessage` في رد Pi المنتهي بخطأ، أو من آخر سطر غير تحذيري في stderr حين يخرج Pi قبل تشغيله، والنص يُطابَق داخل قارئ stderr ثم يُترك:
+    - `AGENT_NOT_LOGGED_IN`: لا دخول، أو انتهى، أو رُفض تجديده (كما في الاختبار الحي).
+    - `AGENT_USAGE_LIMIT` و`AGENT_CREDIT_EXHAUSTED`: حد استخدام المزوّد أو رصيده. الـ429 العادي يعيده Pi أولًا فيصل `AGENT_CONNECTION_FAILED`.
+    - `AGENT_MODEL_UNAVAILABLE` (جديد): الموديل في إعدادات Pi لكنانة غير متاح.
+    - مع `--agent pi` يصير الرمز `stopped.reason_code` برمز خروج2. ومع `auto` يكون سبب Pi في `stopped.providers` تحت `AGENT_AUTO_UNAVAILABLE`.
+  - `AGENT_EXIT_FAILED` (كل خطأ غير معروف)، و`AGENT_EXECUTABLE_NOT_FOUND`، وبقية رموز العملية المعروفة.
+- مع `auto`: `providers` صارت ثلاثة بالترتيب. Claude `planned`. ثم Pi: `fallback` (و`planned_calls` أقصى ما قد يضيفه إذا فشل Claude) إذا كان مفعّلًا، وإلا `disabled` بـ`AGENT_PI_DISABLED`. ثم Codex `unsupported`.
+- `classified_by` قد يكون `"pi"`.
+- `estimated_tokens.calibration` يكون `null` مع `--agent pi`: التقدير نص الطلب وحده، غير معايَر.
+- **تأكيد Pi في `auto` (2026-11-18):** `classify [--confirm <token>]`. قبل أول استدعاء لـPi في التشغيل يلزم تأكيد صريح:
+  - المعاينة (`--dry-run`) لتشغيل `auto` وPi مفعّل تحمل `pi_confirmation` (`PiConfirmation`): `provider` و`model` و`model_default` (العقد 11، أدناه) و`skills` و`max_calls` (ضعف عدد المهارات: استدعاء ومحاولة إضافية) و`token` بصيغة `pc3.<64 hex>` (كان `pc2.` قبل العقد 11). الرمز يربط إعدادات Pi و`--full` وكل مهارة بمعرّفها وتجزئة ما سيُرسل منها إلى Pi (النص المختار وأسماء الملفات)، ولا يتغير بترتيب المهارات (قرار المالك 2026-11-19).
+  - تشغيل بلا `--confirm` يصل إلى مهارة لم يصنّفها Claude: يتوقف قبل تشغيل Pi بـ`stopped.reason_code = "PI_CONFIRMATION_REQUIRED"` ورمز2، و`pi_confirmation` للمهارات الباقية (`stopped.remaining`)، وPi في `stopped.providers` بحالة `fallback` وسبب `PI_CONFIRMATION_REQUIRED`. المكتمل قبلها محفوظ، والباقي بلا أي كتابة. عدم التأكيد هو الرفض.
+  - `--confirm` لرمز لا يطابق الإعدادات والمهارات ومحتواها و`--full` الحالية: خطأ `PI_CONFIRMATION_CHANGED` برمز2 قبل أي استدعاء. `--confirm` مع غير `auto` أو مع Pi مطفأ: `INVALID_ARGUMENTS` برمز1.
+  - `--agent pi` الصريح لا يحتاج هذا التأكيد: هو اختيار المستخدم نفسه.
+- رمز إعدادات جديد: `INVALID_PI_SETTINGS`. جدول `[classification_pi]` في `box.toml` لا يُكتب إلا عند تفعيل Pi أو تعديله، وفيه `enabled` و`provider` و`model` و`thinking` و`account`. تفعيل Pi بلا `provider` صريح يُرفض بـ`INVALID_PI_SETTINGS` عند الحفظ، وعند `classify` بـ`--agent pi` أو `auto` وPi مفعّل (معاينةً وتنفيذًا) قبل أي تشغيل، برمز1 وبلا كتابة (2026-11-18). الموديل صار اختياريًا في العقد 11 (أدناه).
+
+**العقد 11 — مقترحات r5 المعتمدة (قرار المالك 2026-11-24، r7):**
+
+يرفع `x-current-release` العقد إلى 11. الإضافات من [docs/0.3-r5-proposals](0.3-r5-proposals/)، وكل منها في commit مستقل.
+
+- **Pi: المزوّدون والموديلات، والموديل اختياري** ([01](0.3-r5-proposals/01-pi-models-json.md)):
+  - **`pi_confirmation`** (في `classify --json`): حقل مطلوب جديد `model_default: boolean`. `model` هو الموديل الذي سيُمرَّر إلى Pi دائمًا (المختار، أو افتراضي Pi للمزوّد حين يكون `model_default` صحيحًا)، ولا يكون فارغًا أبدًا. بادئة الرمز `pc3.` بدل `pc2.`؛ رمز `pc2.` القديم يُرفض بـ`PI_CONFIRMATION_CHANGED` (رمز2، بلا كتابة).
+  - **رسالة التوقف `PI_CONFIRMATION_REQUIRED`** تذكر «(Pi's default for this provider)» بعد الموديل الافتراضي. الرمز والحقول الأخرى كما هي.
+  - **`INVALID_PI_SETTINGS`:** لم يعد الموديل الفارغ وحده سببًا له. يبقى سببًا للمزوّد الفارغ مع التفعيل، وللموديل الفارغ لمزوّد بلا افتراضي في Pi 1.5.2، وللصيغ غير المقبولة. صار `@` مقبولًا في الموديل.
+  - **`box.toml` `[classification_pi]`:** `model` قد يكون فارغًا أو غائبًا مع `enabled = true`.
+  - **سطح المكتب فقط (لا أمر CLI):** أمر جسر `pi_models` يعيد `{version, providers: [{id, models: [{id, context, max_out, thinking, images}], default_model: string|null, default_listed: boolean}], skipped_rows}`، أو خطأً برمز ثابت: رموز البوابة الحالية (`AGENT_EXECUTABLE_NOT_FOUND` و`AGENT_PACKAGE_UNVERIFIED` و`AGENT_VERSION_UNVERIFIED` و`PI_APPEND_SYSTEM_FILE` وغيرها) و`AGENT_TIMEOUT` و`AGENT_EXIT_FAILED` والجديد `PI_MODELS_UNREADABLE`.
+
+- **اعتماد الأوصاف تلقائيًا** ([02](0.3-r5-proposals/02-auto-approve-json.md)؛ النطاق في SPEC §5.3 البند 4ب: المهارات غير مرتفعة المخاطر، r6):
+  - **`classify --json`:** حقل اختياري جديد `auto_approved: {ids: string[], commit: string}`، يظهر فقط حين اعتُمد وصف واحد على الأقل. `ids` بترتيب التقرير، و`commit` هو commit الاعتماد (بعد commit التصنيف إن وُجد). قد تحمل `warnings` سطرًا يبدأ بـ`AUTO_APPROVAL_FAILED:`. باقي الحقول كما هي، و`committed` يخص commit التصنيف: قد يكون `false` مع `auto_approved` حين لم يغيّر التصنيف ملفًا (اقتراح مطابق للمنتظر). لم يعد CLI يكتب تنبيه `AUTO_APPROVED:`؛ الناتج النصي يذكر الاعتماد بسطر `Approved automatically: …`.
+  - **إعادة تصنيف مهارة لها وصف معتمد (r6):** المقترح المطابق للوصف المختار لا يحتاج حقلًا جديدًا: `proposal_created = false` لمهارة صنّفها مزوّد (`classified_by` ليس `keywords`)، وفي `warnings` الخاصة بها `The proposed description matches the one you chose; nothing waits for review.`
+  - **سلوك:** `classify` غير الجاف بمزوّد قد ينتهي بـcommit للاعتماد بعد commit التصنيف. `undo` بعده يتراجع عن الاعتماد وحده.
+  - **`box.toml`:** مفتاح أعلى جديد `auto_approve_descriptions` (منطقي، افتراضي true، لا يُكتب إلا false). يقرأ بيتا 0.2 المخزن معه (اختبار التعايش)، ويحذفه إن حفظ إعداداته فيعود مفعّلًا.
+  - **حفظ الإعدادات (سطح المكتب):** `auto_approve_descriptions?: boolean` في فعل `save`؛ الغياب يبقي الحالي.
+  - **سطح المكتب:** أمر جسر `undo_auto_approval(commit)` يتراجع فقط إذا كان `commit` هو HEAD، وإلا `AUTO_APPROVAL_NOT_LATEST`.
+
+- **عرض أسباب الفحص: الأسماء والصيغ** ([04](0.3-r5-proposals/04-audit-forms-json.md)؛ النص في SPEC §8 بعد سجل النتيجة):
+  - **كل سجل نتيجة فحص** (`AuditFinding`: `metadata.audit.details[]` في `show --json`، وتقارير المسح والاستيراد والتحديث التي تحمل الفحص): حقل اختياري جديد `forms: string[]`، لنتائج `secrets` فقط ويغيب حين يكون فارغًا. قيمتان ثابتتان تحلان محل قيمة حرفية: `literal secret value (hidden)` و`private key block (hidden)`.
+  - **التخزين:** يُكتب في `[audit]` من `meta/<id>.toml` مع النتيجة. يقرؤه بيتا 0.2 ويتجاهله (لا `deny_unknown_fields` على السجل)، ويحذفه إن أعاد كتابة الفحص.
+  - **لا تغيير** في `rules_version` ولا المستويات ولا `reason_code` ولا `excerpt`.
+
+**تعديلات بعد المراجعة المستقلة للدفعتين 2 و3:**
+- `classify --agent codex` يُرفض الآن قبل قفل الحالة وقبل أي بناء للفهرس.
+- معاينة `auto` تعرض التصنيف الحالي لكل مهارة، كما في معاينة `claude`، لا تصنيف كلمات مفتاحية.
+- رسالة `AGENT_AUTO_UNAVAILABLE` و`AGENT_PI_UNAVAILABLE` تطلب تصنيف المهارات المتبقية فقط (`stopped.remaining`).
+- رد صالح الشكل يفشل التحقق الثاني يوقف `auto` وPi أيضًا، بدل الحفظ بالكلمات.
+- `category_reason` من الوكيل لا يكون فارغًا (`minLength` 1).
+- تعريف لقيمة لم تعد في قائمتها (يتركه 0.2) يُتجاهل في الطلب والمعاينة، ويُحذف عند أول حفظ، ولا يوقف التصنيف.
+- `UNKNOWN_DEFINITION_KEY` يُرفض فقط لمفتاح ليس في القائمة القديمة ولا الجديدة.
+
+**دقة التدقيق — قواعد الإصدار 3 (2026-11-20):**
+
+- **`Audit.rules_version`:** يصير `3` للتدقيقات الجديدة. التدقيق المحفوظ بإصدار أقدم يبقى كما هو حتى إعادة فحص صريحة. القواعد في [المقترح](audit-rules-precision-proposal.md)، والنتائج في [0.3-audit-precision-results.md](0.3-audit-precision-results.md).
+- **أمر جديد `refresh-audit [--confirm <token>]`** يعيد `RefreshAudit`:
+  - `rules_version` و`older`: التدقيقات المحفوظة بقواعد أقدم، ومنها الإصدار 0.
+  - `raised` ثم `lowered` (`LevelChange`: `id` و`from` و`to`)، مرتبة بالمعرّف، و`unchanged`.
+  - `changed` و`preview_token` و`requires_confirmation` و`dry_run` و`committed`.
+
+| الحالة | رمز الخروج | الكتابة |
+| --- | --- | --- |
+| بدون `--confirm`، ولا تدقيق يتغير | 0، `changed: false` | لا شيء |
+| بدون `--confirm`، وتدقيقات تتغير | 2، `requires_confirmation: true` | لا شيء |
+| `--confirm` مطابق مع `--dry-run` | 0، `committed: false` | لا شيء |
+| `--confirm` مطابق | 0، `committed: true` | commit واحد بما تغيّر تدقيقه فقط، يُتراجع عنه بـ`undo` |
+| رمز لا يطابق الحالة | `SETTINGS_PREVIEW_CHANGED` برمز 1 | لا شيء |
+
+**دقة تدقيق البيئة — قواعد الإصدار 4 (مقترح r3، 2026-11-23؛ اعتماد المالك 2026-11-25):**
+
+- **`Audit.rules_version`:** `4` للتدقيقات الجديدة منذ r3، ويبقى 4 بقرار المالك. التدقيق المحفوظ بإصدار أقدم يبقى كما هو حتى إعادة فحص صريحة (`refresh-audit`).
+- **لا يتغيّر شكل `AuditFinding`.**
+- **`reason_code` للحذف المتكرر القسري:** `AUDIT_RECURSIVE_DELETE_STRONG`، ضمن القاعدة `destructive`.
+- `line` و`end_line` غائبا المعنى (null) لسبب لا يقع على سطر، و`excerpt` تكون null حين قد تحتوي معلومات حساسة.
+- القواعد في SPEC §8 (سطر قاعدة الأسرار)، ونص العقد من [المقترح](0.3-r3-proposals/05-audit-json.md).

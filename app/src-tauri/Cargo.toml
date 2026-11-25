@@ -8,7 +8,7 @@ license.workspace = true
 [features]
 default = []
 custom-protocol = ["tauri/custom-protocol"]
-e2e = ["dep:tauri-plugin-wdio-webdriver", "dep:tauri-plugin-wdio"]
+e2e = ["dep:tauri-plugin-wdio-webdriver", "dep:tauri-plugin-wdio", "kinana-core/test-pi-manifest"]
 
 [build-dependencies]
 tauri-build = { version = "=2.7.4", features = [] }

@@ -798,6 +798,7 @@ fn execute(
                     id.clone(),
                     SkillMetadata {
                         proposal_source_changed: None,
+                        classification_context: None,
                         pinned: false,
                         id: id.clone(),
                         content_hash: content_hash.clone(),

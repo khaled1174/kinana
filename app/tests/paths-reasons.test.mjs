@@ -32,3 +32,35 @@ test("bundle editor propagates member-load failures and rejects another vault on
  await assert.rejects(loadBundleSkills(wanted,async()=>({vault:"/vault/two",items:[]})),e=>e.code==="VAULT_CHANGED");
  assert.deepEqual(await loadBundleSkills(wanted,async()=>({vault:wanted,items:[{skill:{id:"member"}}]})),[{id:"member"}]);
 });
+
+test("0.3 stop codes are translated, and only a missing Claude says keywords were used",()=>{
+ // Owner, 2026-11-18: a failing Claude stops or moves to Pi; it never becomes keywords.
+ for(const code of ['AGENT_CLAUDE_UNAVAILABLE','AGENT_AUTO_UNAVAILABLE','AGENT_PI_UNAVAILABLE','AGENT_CODEX_UNSUPPORTED']){
+  assert.match(reasonText(code,'ar'),/[؀-ۿ]/);assert.doesNotMatch(reasonText(code,'en'),/unknown/i);
+ }
+ for(const code of ['AGENT_TOOLS_NOT_ISOLATED','AGENT_CAPABILITY_UNPROVEN','AGENT_EXIT_FAILED','AGENT_TIMEOUT','INVALID_AGENT_PROPOSAL']){
+  assert.doesNotMatch(reasonText(code,'ar'),/الكلمات المفتاحية/);assert.doesNotMatch(reasonText(code,'en'),/keyword/i);
+ }
+ // Formal Arabic for the Codex refusal (no colloquial forms).
+ assert.doesNotMatch(reasonText('AGENT_CODEX_UNSUPPORTED','ar'),/ما نقدر|إنه ما/);
+ assert.match(reasonText('AGENT_CODEX_UNSUPPORTED','ar'),/لا تستطيع/);
+});
+
+test("Pi's model stop has a translated text that names Pi's settings, not Claude",()=>{
+ // Owner, 2026-11-19, live test report, item 1d.
+ assert.match(reasonText('AGENT_MODEL_UNAVAILABLE','ar'),/[؀-ۿ]/);
+ assert.match(reasonText('AGENT_MODEL_UNAVAILABLE','en'),/Pi settings/);
+ assert.doesNotMatch(reasonText('AGENT_MODEL_UNAVAILABLE','en'),/Claude Code/);
+});
+
+test("Pi's connection stop and its extra instructions file have their own translated texts",()=>{
+ // Owner, 2026-11-19, items 3 and 4.
+ for(const code of ['AGENT_CONNECTION_FAILED','PI_APPEND_SYSTEM_FILE']){
+  assert.match(reasonText(code,'ar'),/[؀-ۿ]/);assert.notEqual(reasonText(code,'en'),code);
+  assert.doesNotMatch(reasonText(code,'ar'),/الكلمات المفتاحية/);assert.doesNotMatch(reasonText(code,'en'),/keyword/i);
+ }
+ assert.doesNotMatch(reasonText('AGENT_CONNECTION_FAILED','en'),/tool/i);
+ // It says what blocks Pi and how to get past it.
+ assert.match(reasonText('PI_APPEND_SYSTEM_FILE','en'),/APPEND_SYSTEM\.md.*Rename or move/s);
+ assert.match(reasonText('PI_APPEND_SYSTEM_FILE','ar'),/APPEND_SYSTEM\.md.*غيّر اسم الملف أو انقله/s);
+});

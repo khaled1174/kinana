@@ -70,6 +70,7 @@ fn plant_proposal(sandbox: &Sandbox, id: &str, description: &str) {
         improved_description: description.into(),
         overlaps_with: vec![],
         confidence: 0.9,
+        category_reason: String::new(),
     });
     let result = edit::apply(
         &vault,
@@ -135,7 +136,10 @@ fn classify_previews_json_and_text_then_uses_keyword_fallback_without_source_cha
     assert_eq!(snapshot(&sandbox.root), before);
 
     let head = gitlog::head(&sandbox.vault).unwrap();
-    let classified = success(&sandbox, &["classify", "api-review", "--json"]);
+    let classified = success(
+        &sandbox,
+        &["classify", "api-review", "--agent", "keywords", "--json"],
+    );
     assert_eq!(classified["selected"], 1);
     assert_eq!(classified["agent_calls"], 0);
     assert_eq!(classified["items"][0]["classified_by"], "keywords");

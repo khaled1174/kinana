@@ -127,6 +127,7 @@ fn pending_proposal(overlaps: &[&str]) -> ClassificationProposal {
         improved_description: "Pending review text.".into(),
         overlaps_with: overlaps.iter().map(|id| (*id).to_string()).collect(),
         confidence: 0.8,
+        category_reason: String::new(),
     }
 }
 

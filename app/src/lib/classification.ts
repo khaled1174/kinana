@@ -1,3 +1,9 @@
+import type { ProviderStatus } from "../bridge";
+
+/** Stop codes after which the user picks the next step (Claude or keywords);
+ * the same list as `STOPS_THAT_ASK` in crates/core/src/classify.rs. */
+export const STOPS_THAT_ASK = ["AGENT_AUTO_UNAVAILABLE", "AGENT_PI_UNAVAILABLE", "AGENT_CLAUDE_UNAVAILABLE", "PI_CONFIRMATION_REQUIRED", "AGENT_USAGE_LIMIT", "AGENT_CREDIT_EXHAUSTED", "AGENT_NOT_LOGGED_IN", "AGENT_MODEL_UNAVAILABLE"];
+
 /** What a finished classification report tells the user about fallbacks. */
 export type ReportItem = { id: string; classified_by: string; proposal_created: boolean; reason_code?: string; searched_locations?: string[] };
 
@@ -25,4 +31,9 @@ export function classificationOutcome(items: ReportItem[]): Outcome {
 export function itemReason(item: ReportItem, outcome: Outcome): string | undefined {
   if (item.classified_by !== "keywords" || item.proposal_created || outcome.sharedReason) return undefined;
   return item.reason_code;
+}
+
+/** A stop with one failed provider still has a reason to show. */
+export function showProviderDetails(providers: ProviderStatus[], stopped: boolean): boolean {
+  return providers.length > 1 || (stopped && providers.some(provider => provider.status === "failed" && !!provider.reason_code));
 }

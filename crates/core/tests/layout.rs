@@ -30,6 +30,7 @@ impl Drop for Scratch {
 fn metadata(id: &str, directories: &[&str]) -> SkillMetadata {
     SkillMetadata {
         proposal_source_changed: None,
+        classification_context: None,
         pinned: false,
         id: id.into(),
         content_hash: "blake3:recorded".into(),

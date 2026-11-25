@@ -169,16 +169,18 @@ fn compound_download_execution_patterns_are_risky() {
 
 #[test]
 fn destructive_command_variants_are_risky() {
+    // Rules version 3 judges a recursive delete by its target (owner, 2026-11-20).
     for body in [
-        "rm -fr /tmp/example",
-        "rm --recursive --force /tmp/example",
-        "rm -r -f /tmp/example",
-        "/bin/rm -rf /tmp/example",
+        "rm -fr ~",
+        "rm --recursive --force \"$HOME\"",
+        "rm -r -f /",
+        "/bin/rm -rf ~/.ssh",
+        "rm -rf ~/.config",
+        "rm -rf .claude/skills",
+        "rm -rf ~/KinanaVault",
         "git -C /tmp/example push -f origin main",
         "git push --force-with-lease",
-        "chmod -R 0777 /tmp/example",
-        "chmod a+rwx /tmp/example",
-        "Remove-Item -Recurse -Force /tmp/example",
+        "Remove-Item -Recurse -Force $env:USERPROFILE",
         "dd if=/dev/zero of=/dev/disk0",
     ] {
         let temp = Scratch::new();
@@ -194,20 +196,131 @@ fn destructive_command_variants_are_risky() {
 }
 
 #[test]
-fn secret_and_environment_access_variants_are_risky() {
+fn every_recursive_forced_delete_is_risky_whatever_its_target() {
+    // Owner decision (2026-11-20, round 5): no target analysis, no exception
+    // for /tmp or for variables.
+    for body in [
+        "rm -fr /tmp/example",
+        "rm --recursive --force /tmp/example",
+        "rm -rf \"$TEST_ROOT\"",
+        "rm -rf \"$TMPDIR/example\"",
+        "rm -rf build",
+        "rm -rf \"$(mktemp -d)\"",
+        "sudo rm -rf /tmp/example",
+        "Run `rm -rf \"$BUILD_DIR\"` and then `rm -rf /tmp/example`.",
+        "Remove-Item -Recurse -Force /tmp/example",
+        "rd /s /q build",
+    ] {
+        assert_strong_delete(body);
+    }
+}
+
+#[test]
+fn every_spelling_of_a_recursive_forced_delete_is_detected() {
+    for body in [
+        // ${IFS} and its forms as a separator.
+        "rm${IFS}-rf${IFS}/",
+        "rm$IFS-rf$IFS/",
+        "rm${IFS%?}-rf${IFS%?}~",
+        "rm$IFS$9-rf$IFS$9/",
+        // PowerShell switch values and abbreviations.
+        "Remove-Item -Recurse:$true -Force:$true ~",
+        "Remove-Item -r -fo ~",
+        "ri -Recurse -Force ~",
+        "rmdir -Recurse -Force ~",
+        "Remove-Item \u{2013}Recurse \u{2013}Force ~",
+        // cmd.
+        "rd /s/q c:\\",
+        "del /s /q c:\\*",
+        // Wrapped, quoted or escaped command names and flags.
+        "/bin/rm -rf /tmp/x",
+        "./rm -rf /tmp/x",
+        "command rm -rf ~",
+        "\\rm -rf ~",
+        "r''m -rf /",
+        "rm -r''f /",
+        "\"rm\"-rf /",
+        "rm --rec --forc /",
+        "rm.exe -rf c:/",
+        // Unusual spaces.
+        "rm\u{a0}-rf\u{a0}/",
+        "rm\r-rf /",
+        "rm\u{b}-rf\u{b}/",
+        "rm\u{c}-rf\u{c}/",
+        "rm\u{3000}-rf /",
+        // After separators, comments, backticks and substitutions.
+        "ls; rm -rf ~",
+        "ls && rm -rf ~",
+        "ls | xargs rm -rf",
+        "echo ok # ; rm -rf ~",
+        "echo `rm -rf ~`",
+        "echo $(rm -rf ~)",
+        "{rm,-rf,/}",
+        "cleanup() { rm -rf \"$scratch\"; }",
+        "trap 'rm -rf \"$workdir\"' EXIT",
+        // JSON escapes before the command.
+        "{\"cmd\": \"echo hi;\\trm -rf /\"}",
+        "{\"cmd\": \"x\\nrm -rf /\"}",
+        "{\"cmd\": \"\\u0072m -rf /\"}",
+    ] {
+        assert_strong_delete(body);
+    }
+}
+
+#[test]
+fn chmod_777_and_deletes_that_are_not_recursive_and_forced_are_review() {
+    for body in [
+        "chmod -R 0777 /tmp/example",
+        "chmod a+rwx /tmp/example",
+        "chmod 777 ~",
+        "rm -r ~",
+        "rm -f ~/file",
+        "Remove-Item -Recurse ~",
+        "Remove-Item -Recurse:$false -Force ~",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(body)).unwrap();
+        assert_eq!(audit.level, "review", "{body}: {:?}", audit.findings);
+        assert!(
+            audit
+                .details
+                .iter()
+                .any(|d| d.rule == "destructive" && d.strength == "weak"),
+            "{body}"
+        );
+    }
+}
+
+fn assert_strong_delete(body: &str) {
+    let temp = Scratch::new();
+    let audit = audit_skill(&temp.skill(body)).unwrap();
+    assert_eq!(audit.level, "risky", "{body:?}: {:?}", audit.findings);
+    assert!(
+        audit
+            .details
+            .iter()
+            .any(|d| d.rule == "destructive" && d.strength == "strong"),
+        "{body:?}"
+    );
+}
+
+#[test]
+fn a_long_line_of_delete_words_is_judged_in_linear_time() {
+    let line = "rm -rf ".repeat(40_000);
+    let start = std::time::Instant::now();
+    let temp = Scratch::new();
+    let audit = audit_skill(&temp.skill(&line)).unwrap();
+    assert_eq!(audit.level, "risky");
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+}
+
+#[test]
+fn credential_files_are_risky() {
     for body in [
         "read ~/.ssh/id_ed25519",
-        "read .env.local",
-        "AWS_SECRET_ACCESS_KEY",
-        "EXAMPLE_TOKEN",
-        "process.env.HOME",
-        "os.environ['HOME']",
-        "os.getenv('HOME')",
-        "std::env::var(\"HOME\")",
-        "getenv('HOME')",
-        "$HOME",
-        "${HOME}",
-        "$env:HOME",
+        "cat ~/.aws/credentials",
+        "cat ~/.netrc",
+        "cat .git-credentials",
     ] {
         let temp = Scratch::new();
         let audit = audit_skill(&temp.skill(body)).unwrap();
@@ -218,6 +331,136 @@ fn secret_and_environment_access_variants_are_risky() {
                 .iter()
                 .any(|finding| finding.contains("secret or environment"))
         );
+    }
+}
+
+#[test]
+fn a_mention_of_where_secrets_live_is_risky_where_the_old_rules_said_so() {
+    // Owner decision 2026-11-20, round 6: the old rules stay in full.
+    for body in [
+        "read .env.local",
+        "Never print `.env` values.",
+        "cat ~/.aws/sso/cache/x.json",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(body)).unwrap();
+        assert_eq!(audit.level, "risky", "{body}: {:?}", audit.findings);
+    }
+    // Not in the old rules: a new weak pattern.
+    let temp = Scratch::new();
+    let audit = audit_skill(&temp.skill("keep ~/.npmrc private")).unwrap();
+    assert_eq!(audit.level, "review", "{:?}", audit.findings);
+}
+
+#[test]
+fn a_plain_variable_reference_is_not_a_secret() {
+    // The one approved secret exception (owner, 2026-11-20, round 6): a match
+    // of the old test whose matched part is `$NAME`, `${NAME}` or `${expr}`
+    // inside a JavaScript template literal.
+    for body in [
+        "$HOME",
+        "${HOME}",
+        "## Feature: $ARGUMENTS",
+        "Use $build-startup-brand in full mode.",
+        "echo \"missing config: $CONFIG\"",
+        "\"$schema\": \"./schema.json\"",
+        "find $HOME -name x",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(body)).unwrap();
+        assert_eq!(audit.level, "clean", "{body}: {:?}", audit.findings);
+    }
+}
+
+/// Owner, 2026-11-24 (r7 item 4): a name split at a camelCase boundary is
+/// read with its own case, although the old secret test reads lowercased
+/// text; a zero-width character or a character that lowercases to ASCII
+/// does not hide the boundary.
+#[test]
+fn a_secret_name_found_by_its_case_stays_risky() {
+    for (file, body) in [
+        ("run.sh", "echo $sessionId"),
+        ("run.sh", "echo ${stageKey}"),
+        ("run.sh", "echo $githubPat"),
+        ("run.sh", "echo $APIKey"),
+        ("run.sh", "echo ${stage\u{200b}Key}"),
+        ("run.sh", "echo ${stage\u{212a}ey}"),
+        ("run.js", "const v = process.env.userAuth;"),
+        ("run.js", "const t = `${stageKey}`;"),
+        ("run.js", "const t = `${cfg.stageKey}`;"),
+        ("run.py", "v = os.environ.get(\"cookieJar\")"),
+    ] {
+        let temp = Scratch::new();
+        let skill = temp.skill("Body.");
+        fs::write(skill.join(file), body).unwrap();
+        let audit = audit_skill(&skill).unwrap();
+        assert!(
+            audit
+                .details
+                .iter()
+                .any(|d| d.rule == "secrets" && d.strength == "strong"),
+            "{file}: {body}: {:?}",
+            audit.details
+        );
+    }
+    // The same letters without a boundary name no secret.
+    for (file, body) in [
+        ("run.sh", "echo $stagekey"),
+        ("run.sh", "echo $monkey"),
+        ("run.sh", "echo $PATH"),
+        ("run.sh", "echo $author"),
+        ("run.js", "const v = process.env.useragent;"),
+    ] {
+        let temp = Scratch::new();
+        let skill = temp.skill("Body.");
+        fs::write(skill.join(file), body).unwrap();
+        let audit = audit_skill(&skill).unwrap();
+        assert!(
+            !audit.details.iter().any(|d| d.rule == "secrets"),
+            "{file}: {body}: {:?}",
+            audit.details
+        );
+    }
+}
+
+#[test]
+fn every_other_match_of_the_old_secret_test_stays_risky() {
+    for body in [
+        // Identifier, assignment and header clauses.
+        "AWS_SECRET_ACCESS_KEY",
+        "EXAMPLE_TOKEN",
+        "API_TOKEN",
+        "export GITHUB_TOKEN=example",
+        "TOKEN=example",
+        "TOKEN = 'example'",
+        "Authorization: Bearer example",
+        "'Authorization': 'Bearer $GITHUB_TOKEN'",
+        "export GH_TOKEN=$(gh auth token)",
+        "$TOKEN",
+        "${TOKEN}",
+        "echo $GITHUB_TOKEN",
+        // Environment readers are not plain references.
+        "std::env::var(\"HOME\")",
+        "$env:HOME",
+        "const t = `Bearer ${process.env.API_KEY}`;",
+        // A `${...}` outside a template literal that is not a plain name.
+        "echo ${TOKEN:-none}",
+        "echo ${#list[@]}",
+        // Outside JavaScript source, backticks are not a template literal.
+        "const id = `row-${r.id}`;",
+        "Run `cat ${HOME-/root}/.config/gh/hosts.yml` first.",
+        "Use `${secrets.API_KEY}` here.",
+        "```sh\nd=`ls ${XDG.x}`\n```",
+        // Variables being written are not plain references.
+        "$password = \"hunter2\";",
+        "$api_token .= \"abc\";",
+        "$api_token['k'] = 'v';",
+        "my ($api_token, $u) = @_;",
+        "my $aws_secret = 'abc';",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(body)).unwrap();
+        assert_eq!(audit.level, "risky", "{body}: {:?}", audit.findings);
     }
 }
 
@@ -419,22 +662,39 @@ fn design_token_prose_is_clean_without_credential_syntax() {
     }
 }
 
+/// A deterministic high-entropy literal built at run time, so no source line
+/// looks like a real credential.
+fn literal(length: usize) -> String {
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..length)
+        .map(|i| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if i % 5 == 4 {
+                char::from(b'0' + ((state >> 33) % 10) as u8)
+            } else {
+                char::from(alphabet[((state >> 33) % alphabet.len() as u64) as usize])
+            }
+        })
+        .collect()
+}
+
 #[test]
-fn token_assignments_identifiers_and_authorization_headers_are_risky() {
+fn token_assignments_with_literal_values_and_authorization_headers_are_risky() {
+    let value = literal(32);
     for body in [
-        "export GITHUB_TOKEN=example",
-        "TOKEN=example",
-        "TOKEN = 'example'",
-        "$TOKEN",
-        "${TOKEN}",
-        "API_TOKEN",
-        "EXAMPLE_TOKEN",
-        "Authorization: Bearer example",
-        "'Authorization': 'Bearer example'",
-        "Authorization = 'Bearer example'",
+        format!("export GITHUB_TOKEN={value}"),
+        format!("TOKEN={value}"),
+        format!("TOKEN = '{value}'"),
+        format!("API_KEY: \"{value}\""),
+        format!("Authorization: Bearer {value}"),
+        format!("'Authorization': 'Bearer {value}'"),
+        format!("Authorization = 'Bearer {value}'"),
     ] {
         let temp = Scratch::new();
-        let report = audit_skill(&temp.skill(body)).unwrap();
+        let report = audit_skill(&temp.skill(&body)).unwrap();
         assert_eq!(report.level, "risky", "{body}: {:?}", report.findings);
         assert!(
             report
@@ -443,6 +703,17 @@ fn token_assignments_identifiers_and_authorization_headers_are_risky() {
                 .any(|f| f.contains("secret or environment")),
             "{body}"
         );
+        // The value never reaches an excerpt.
+        assert!(report.details.iter().all(|d| d.excerpt.is_none()), "{body}");
+    }
+}
+
+#[test]
+fn placeholders_outside_the_old_rules_are_not_secrets() {
+    for body in ["API_KEY=your-api-key-here", "max_tokens: 4096"] {
+        let temp = Scratch::new();
+        let report = audit_skill(&temp.skill(body)).unwrap();
+        assert_eq!(report.level, "clean", "{body}: {:?}", report.findings);
     }
 }
 
@@ -567,4 +838,218 @@ fn ambiguous_password_assignments_do_not_leak_values_in_audit_excerpts() {
             .iter()
             .any(|d| d.rule == "secrets" && d.line == Some(5))
     );
+}
+
+#[test]
+fn recursive_delete_has_a_safe_excerpt_and_exact_location() {
+    let temp = Scratch::new();
+    let skill = temp.skill("Body.");
+    fs::write(
+        skill.join("test.sh"),
+        "echo fixture\nrm -rf \"$TEST_ROOT\"\n",
+    )
+    .unwrap();
+    let audit = audit_skill(&skill).unwrap();
+    let item = audit
+        .details
+        .iter()
+        .find(|d| d.reason_code == "AUDIT_RECURSIVE_DELETE_STRONG")
+        .unwrap();
+    assert_eq!(item.path, Path::new("test.sh"));
+    assert_eq!(item.line, Some(2));
+    assert_eq!(item.excerpt.as_deref(), Some("rm -rf \"$TEST_ROOT\""));
+
+    fs::write(
+        skill.join("test.sh"),
+        "rm -rf \"${TEST_ROOT:-HIDDEN_SYNTHETIC_MARKER}\"",
+    )
+    .unwrap();
+    let audit = audit_skill(&skill).unwrap();
+    assert_eq!(audit.level, "risky");
+    assert!(
+        !serde_json::to_string(&audit)
+            .unwrap()
+            .contains("HIDDEN_SYNTHETIC_MARKER")
+    );
+}
+
+#[test]
+fn environment_dumps_writes_and_unrelated_ignore_patterns_remain_risky() {
+    for (file, body) in [
+        ("run.sh", "env -u HOME"),
+        ("run.sh", "env LANG=C"),
+        ("run.sh", "printenv"),
+        ("run.sh", "echo \"${MODE:-$(env)}\""),
+        ("run.js", "++process.env.BUILD_MODE"),
+        ("run.js", "delete process.env.BUILD_MODE"),
+        ("run.js", "delete (process.env.BUILD_MODE)"),
+        ("run.js", "++(process.env.BUILD_MODE)"),
+        ("run.js", "delete /* comment */ process.env.BUILD_MODE"),
+        ("run.js", "process.env.BUILD_MODE /* comment */ = 'fixture'"),
+        ("run.js", "delete // comment\nprocess.env.BUILD_MODE"),
+        ("run.js", "process.env.BUILD_MODE // comment\n = 'fixture'"),
+        ("run.js", "for (process.env.BUILD_MODE of ['fixture']) {}"),
+        ("run.js", "(process.env.BUILD_MODE) = 'fixture'"),
+        ("run.js", "[process.env.BUILD_MODE, x] = ['fixture', 0]"),
+        ("run.js", "process.env.BUILD_MODE\n = 'fixture'"),
+        ("run.py", "del os.environ[\"BUILD_MODE\"]"),
+        ("run.py", "os.environ[\"BUILD_MODE\"]: str = 'fixture'"),
+        (".gitignore", "feature.env\n.env*\n"),
+        (
+            "run.js",
+            "const n = 1 / 1; const x = `abc/def`;\n// ${row.id}\nconst y = `text`;",
+        ),
+        ("run.tsx", "const x = <p>`\n${row.id}\n`</p>;"),
+    ] {
+        let temp = Scratch::new();
+        let skill = temp.skill("Body.");
+        fs::write(skill.join(file), body).unwrap();
+        assert_eq!(
+            audit_skill(&skill).unwrap().level,
+            "risky",
+            "{file}: {body}"
+        );
+    }
+}
+
+#[test]
+fn package_commands_add_review_only_and_recognize_pins() {
+    for command in [
+        "npx fixture@latest",
+        "npx @scope/fixture",
+        "npx -y --package=fixture runner",
+        "npm exec fixture@1.2.3",
+        "uvx --from fixture runner",
+        "uvx fixture",
+        "pipx run --spec fixture runner",
+        "pipx run fixture",
+        "pip install https://packages.example.invalid/file.whl",
+        "python -m pip install git+https://example.invalid/fixtures.git",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(command)).unwrap();
+        assert_eq!(audit.level, "review", "{command}");
+        assert!(
+            audit
+                .details
+                .iter()
+                .any(|d| d.reason_code == "AUDIT_PACKAGE_EXECUTION_WEAK"),
+            "{command}"
+        );
+    }
+    for command in [
+        "npx @scope/fixture@1.2.3",
+        "npx --package fixture@3.2.1 runner",
+        "uvx fixture@2.4",
+        "pipx run --spec fixture==2.4.1 runner",
+        "pip install fixture==3.2.1",
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(command)).unwrap();
+        assert!(
+            !audit.details.iter().any(|d| d.rule == "package_execution"),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn multibyte_text_around_secret_and_command_patterns_never_panics() {
+    // Windows over the text must not split a multi-byte character.
+    // Publish review (2026-11-25): PEM headers are joined at run time, so
+    // this file holds no literal a secret scanner takes for a key.
+    let begin = |kind: &str| format!("-----BEGIN {kind}PRIVATE KEY-----");
+    for body in [
+        format!(
+            "{}مفتاح تجريبي قصير جدًا ‏-----END PRIVATE KEY-----",
+            begin("")
+        ),
+        begin("مفتاح "),
+        format!("{}{}", begin("RSA "), "ع".repeat(70)),
+        "API_KEY=ئؤءآأإ٠١٢٣٤٥٦٧٨٩abcdef".to_string(),
+        "rm -rf \"$مجلد/\"*".to_string(),
+        "sk-ع ghp_ع AKIAع xoxb-ع npm_ع".to_string(),
+    ] {
+        let temp = Scratch::new();
+        audit_skill(&temp.skill(&body)).unwrap();
+    }
+}
+
+#[test]
+fn prose_around_a_delete_word_is_not_a_delete_command() {
+    // Review r11 (E1, E2): a Markdown code span ending a line before prose
+    // is not a PowerShell continuation; an em dash before a word is not a
+    // flag cluster.
+    for body in [
+        "The delete command is `rm`\n`-r` and `-f` are its common flags.".to_string(),
+        "Remove files with `rm`\nFlags: -r for folders, -f to skip prompts.".to_string(),
+        "Never call rm on a folder you have not checked \u{2014}frankly it is the most common mistake."
+            .to_string(),
+    ] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(&body)).unwrap();
+        assert_ne!(audit.level, "risky", "{body:?}: {:?}", audit.findings);
+    }
+}
+
+#[test]
+fn a_line_too_long_to_expand_fails_closed() {
+    // Review r11 (C): expansion stops after 16 KiB. A text it cannot read in
+    // full gets the old secret test in full, so a delete such as
+    // `r${u}m -rf ~` past the budget stays risky, as under the old rules.
+    let padding = format!("b={}; {}", "x".repeat(64), "$b ".repeat(2_000));
+    for tail in ["a=rm; $a -rf ~", "r${u}m -rf ~", "echo done"] {
+        let temp = Scratch::new();
+        let audit = audit_skill(&temp.skill(&format!("{padding}{tail}"))).unwrap();
+        assert_eq!(audit.level, "risky", "{tail}: {:?}", audit.findings);
+    }
+}
+
+#[test]
+fn continued_lines_and_far_flags_are_one_command() {
+    // Security review of b31cfa3: a continuation without a space before the
+    // mark, when the next line starts with a parameter, and flags after any
+    // number of operands.
+    let operands = "x ".repeat(90);
+    for body in [
+        "Remove-Item $dir`\n    -Recurse -Force".to_string(),
+        "rd c:\\x^\n/s /q".to_string(),
+        "Use del^\n /s /q for that.".to_string(),
+        format!("rm {operands}-rf ~"),
+    ] {
+        assert_strong_delete(&body);
+    }
+}
+
+#[test]
+fn a_template_expression_is_a_plain_reference_only_in_javascript_source() {
+    // Approved exception: `${expr}` inside a JavaScript template literal.
+    for (file, body, level) in [
+        ("scripts/a.js", "const id = `row-${r.id}`;", "clean"),
+        ("scripts/a.tsx", "const t = `Pay ${fmt(price)}`;", "clean"),
+        ("scripts/a.sh", "out=`echo ${HOME.x}`", "risky"),
+        (
+            "scripts/a.js",
+            "const t = `Bearer ${process.env.API_KEY}`;",
+            "risky",
+        ),
+        ("scripts/a.js", "const t = `${HOME-x}`;", "risky"),
+    ] {
+        let temp = Scratch::new();
+        let skill = temp.skill("Body.");
+        let path = skill.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+        let audit = audit_skill(&skill).unwrap();
+        let strong = audit
+            .details
+            .iter()
+            .any(|d| d.rule == "secrets" && d.strength == "strong");
+        assert_eq!(
+            strong,
+            level == "risky",
+            "{file}: {body}: {:?}",
+            audit.findings
+        );
+    }
 }

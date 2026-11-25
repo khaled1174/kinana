@@ -196,6 +196,8 @@ pub fn read(vault: &Vault, home: &Path) -> Result<Snapshot> {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+// One settings request at a time, read from JSON; size is not a concern.
+#[allow(clippy::large_enum_variant)]
 pub enum Action {
     Initialize {
         path: PathBuf,
@@ -214,6 +216,19 @@ pub enum Action {
         stages: Option<Vec<String>>,
         scan_paths: Vec<PathBuf>,
         record_found_in: bool,
+        /// 0.3: the whole set of user definitions after the edit; absent
+        /// keeps the current ones. Values removed from a list lose theirs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definitions: Option<crate::taxonomy::Definitions>,
+        /// 0.3: Pi settings after the edit; absent keeps the current ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pi: Option<crate::PiSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude: Option<crate::ClaudeSettings>,
+        /// 0.3 (r5, r6): approve proposed descriptions of skills that are not risky
+        /// automatically after a classification; absent keeps the current.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_approve_descriptions: Option<bool>,
     },
     RebuildIndex,
     InstallRouter,
@@ -234,6 +249,9 @@ pub struct Plan {
     pub changes: Vec<Change>,
     pub diagnostic_codes: Vec<String>,
     pub changed: bool,
+    /// For `refresh_audit`: how every skill's level would change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit: Option<audit::RulesUpgrade>,
 }
 /// A vault path from the desktop must be absolute or start with `~`: an app
 /// opened from Finder runs in `/`, so a relative path would land there
@@ -269,15 +287,35 @@ fn candidate(vault: &Vault, home: &Path, action: &Action) -> Result<BoxConfig> {
         stages,
         scan_paths,
         record_found_in,
+        definitions,
+        pi,
+        claude,
+        auto_approve_descriptions,
     } = action
     else {
         unreachable!()
     };
-    if !matches!(
-        classification_agent.as_str(),
-        "claude" | "keywords" | "codex"
-    ) {
-        return Err(Error::new("INVALID_AGENT", "Unknown classification agent"));
+    // `codex` from a 0.2 box.toml is kept while unchanged; choosing it anew
+    // is refused with the reason (owner decision, 2026-11-18).
+    let pi = match pi {
+        Some(pi) => {
+            crate::agent_runner::pi::validate_settings(pi)?;
+            pi.clone()
+        }
+        None => vault.config()?.classification_pi,
+    };
+    match classification_agent.as_str() {
+        "claude" | "keywords" | "auto" => {}
+        "pi" if pi.enabled => {}
+        "pi" => {
+            return Err(Error::new(
+                "AGENT_PI_DISABLED",
+                "Enable Pi (experimental) before choosing it as the classification agent",
+            ));
+        }
+        "codex" if vault.config()?.classification_agent == "codex" => {}
+        "codex" => return Err(crate::agent_runner::codex_unsupported()),
+        _ => return Err(Error::new("INVALID_AGENT", "Unknown classification agent")),
     }
     if categories.is_empty()
         || categories
@@ -379,6 +417,56 @@ fn candidate(vault: &Vault, home: &Path, action: &Action) -> Result<BoxConfig> {
     }
     config.scan_paths = scan_paths;
     config.record_found_in = *record_found_in;
+    // A definition for a value outside its new list is refused when sent; a
+    // stored one for a removed value goes with the value in the same save.
+    // A sent definition for a value this same save removes goes with it; a
+    // key that is in neither the old nor the new list is refused.
+    if let Some(definitions) = definitions {
+        let previous = vault.config()?;
+        let mut requested = config.clone();
+        requested.definitions = definitions.clone();
+        for (kind, sent, old, new) in [
+            (
+                "category",
+                &definitions.categories,
+                &previous.categories,
+                &config.categories,
+            ),
+            (
+                "stack",
+                &definitions.stacks,
+                &previous.stacks,
+                &config.stacks,
+            ),
+            (
+                "stage",
+                &definitions.stages,
+                &previous.stages,
+                &config.stages,
+            ),
+        ] {
+            if let Some(key) = sent.keys().find(|k| !old.contains(k) && !new.contains(k)) {
+                return Err(Error::new(
+                    "UNKNOWN_DEFINITION_KEY",
+                    format!("A {kind} definition names '{key}', which is not in the {kind} list"),
+                ));
+            }
+        }
+        crate::taxonomy::validate(&crate::taxonomy::in_effect(&requested))?;
+    }
+    let definitions = definitions
+        .clone()
+        .unwrap_or_else(|| config.definitions.clone());
+    config.definitions = crate::taxonomy::normalized(&config, definitions);
+    config.classification_pi = pi;
+    if let Some(claude) = claude {
+        crate::agent_runner::validate_claude_settings(claude)?;
+        config.classification_claude = claude.clone();
+    }
+    if let Some(auto) = auto_approve_descriptions {
+        config.auto_approve_descriptions = *auto;
+    }
+    crate::taxonomy::validate(&config)?;
     Ok(config)
 }
 fn preferences_bytes(home: &Path, root: &Path) -> Result<Vec<u8>> {
@@ -429,6 +517,27 @@ fn config_bytes(vault: &Vault, config: &BoxConfig) -> Result<Vec<u8>> {
             table.insert(key.into(), updated.get(key).unwrap().clone());
         }
     }
+    // Only what differs from the defaults is written; nothing for a vault
+    // that keeps them (0.3).
+    for key in [
+        "classification_pi",
+        "classification_claude",
+        "auto_approve_descriptions",
+    ] {
+        if let Some(value) = updated.get(key) {
+            table.insert(key.into(), value.clone());
+        } else {
+            table.remove(key);
+        }
+    }
+    match updated.get("definitions") {
+        Some(definitions) => {
+            table.insert("definitions".into(), definitions.clone());
+        }
+        None => {
+            table.remove("definitions");
+        }
+    }
     Ok(toml::to_string_pretty(&document)?.into_bytes())
 }
 fn validate_remote(url: &str) -> Result<()> {
@@ -469,6 +578,7 @@ pub fn preview(vault: &Vault, home: &Path, action: &Action) -> Result<Plan> {
         changes: vec![],
         diagnostic_codes: vec![],
         changed: true,
+        audit: None,
     };
     let target = match action {
         Action::Initialize { path } | Action::SelectVault { path } => {
@@ -543,7 +653,7 @@ pub fn preview(vault: &Vault, home: &Path, action: &Action) -> Result<Plan> {
             }
         }
         Action::RefreshAudit => {
-            audit::refresh(vault, &[], true)?;
+            plan.audit = Some(audit::rules_upgrade(vault)?);
             for r in vault.records()? {
                 plan.changes.push(change(
                     vault.root.join("meta").join(format!("{}.toml", r.id)),
@@ -578,6 +688,10 @@ pub fn preview(vault: &Vault, home: &Path, action: &Action) -> Result<Plan> {
                 || current.stages != next.stages
                 || current.scan_paths != next.scan_paths
                 || current.record_found_in != next.record_found_in
+                || current.definitions != next.definitions
+                || current.classification_pi != next.classification_pi
+                || current.classification_claude != next.classification_claude
+                || current.auto_approve_descriptions != next.auto_approve_descriptions
         }
         Action::SelectVault { .. } => {
             fs::read(preferences_path(home)).ok().as_deref()
@@ -847,6 +961,63 @@ pub fn apply_controlled(
         committed,
         changed: true,
     })
+}
+
+/// `desktop.toml` key: the rules version whose re-audit prompt the user has
+/// already answered on this computer.
+const AUDIT_RULES_PROMPTED: &str = "audit_rules_prompted";
+
+/// Number of stored audits made by older rules, when the app should offer the
+/// re-audit preview at start. Reads only; first open writes nothing. Legacy
+/// state (`~/.skillsbox`) is read-only until `migrate`, so nothing is offered
+/// before the migration: the answer could not be recorded (review H1).
+pub fn audit_rules_prompt(home: &Path, vault_root: &Path) -> Result<Option<usize>> {
+    if !vault_root.join("box.toml").is_file() {
+        return Ok(None);
+    }
+    if crate::state::directory(home)? != crate::state::current(home) {
+        return Ok(None);
+    }
+    let older = audit::older_rules(vault_root)?;
+    if older == 0 {
+        return Ok(None);
+    }
+    let path = index::validate_path(&crate::state::directory(home)?.join("desktop.toml"))?;
+    let prompted = match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str::<toml::Value>(&text)?
+            .get(AUDIT_RULES_PROMPTED)
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => return Err(e.into()),
+    };
+    Ok((prompted < i64::from(audit::RULES_VERSION)).then_some(older))
+}
+
+/// Record that the user answered the prompt (opened the preview or chose
+/// "not now"). Only an explicit click calls this; stored audits are untouched.
+/// The write goes through the state guard: on legacy state it is refused with
+/// `MIGRATION_REQUIRED` and `~/.kinana` is never created next to it (H1).
+pub fn record_audit_rules_prompt(home: &Path) -> Result<()> {
+    let _state_guard = crate::state::write_guard(&crate::state::index_path(home)?, false)?;
+    let root = preferred_vault(home)?;
+    let mut document: toml::Value = toml::from_str(
+        std::str::from_utf8(&preferences_bytes(home, &root)?)
+            .map_err(|e| Error::new("INVALID_DESKTOP_PREFERENCES", e.to_string()))?,
+    )?;
+    document
+        .as_table_mut()
+        .ok_or_else(|| Error::new("INVALID_DESKTOP_PREFERENCES", "Expected a settings table"))?
+        .insert(
+            AUDIT_RULES_PROMPTED.into(),
+            toml::Value::Integer(i64::from(audit::RULES_VERSION)),
+        );
+    let mut write = SettingsWrite::publish(
+        preferences_path(home),
+        toml::to_string_pretty(&document)?.into_bytes(),
+    )?;
+    write.finished = true;
+    Ok(())
 }
 
 pub fn validate_scan_paths(vault: &Vault, home: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>> {

@@ -57,7 +57,8 @@ pub fn classification(report: &crate::ClassifyReport) -> Result<Value> {
     if report.dry_run {
         codes.push("CLASSIFICATION_PREVIEW_ONLY");
     }
-    if report.items.iter().any(|i| i.attempts > 1) {
+    if report.items.iter().any(|i| i.attempts > 1) || report.skipped.iter().any(|i| i.attempts > 1)
+    {
         codes.push("CLASSIFICATION_RETRIED");
     }
     if report

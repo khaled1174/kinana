@@ -405,6 +405,33 @@ fn patched(bytes: &[u8], update: &SkillMetadata) -> Result<Vec<u8>> {
             root.remove("proposal_source_changed");
         }
     }
+    // `binds` is set only by a fresh agent classification and never
+    // recomputed here: a write that changed the classification it belongs to
+    // (an edit of the category) drops the context instead of re-binding it.
+    match update
+        .classification_context
+        .as_ref()
+        .filter(|context| context.binds == crate::context_binding(&update.classification))
+    {
+        Some(context) => {
+            let mut table = toml::map::Map::new();
+            table.insert(
+                "prompt_version".into(),
+                toml::Value::Integer(context.prompt_version.into()),
+            );
+            if !context.category_reason.is_empty() {
+                table.insert(
+                    "category_reason".into(),
+                    toml::Value::String(context.category_reason.clone()),
+                );
+            }
+            table.insert("binds".into(), toml::Value::String(context.binds.clone()));
+            root.insert("classification_context".into(), toml::Value::Table(table));
+        }
+        None => {
+            root.remove("classification_context");
+        }
+    }
     // `stack` and `stage` of a waiting proposal are stored beside the
     // `[proposal]` table (see `StoredSkillMetadata`).
     root.remove("proposal_dimensions");
@@ -413,7 +440,7 @@ fn patched(bytes: &[u8], update: &SkillMetadata) -> Result<Vec<u8>> {
             let mut stored = toml::Value::try_from(proposal)?;
             let mut dimensions = toml::map::Map::new();
             if let Some(table) = stored.as_table_mut() {
-                for key in ["stack", "stage"] {
+                for key in ["stack", "stage", "category_reason"] {
                     if let Some(values) = table.remove(key) {
                         dimensions.insert(key.into(), values);
                     }

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+[features]
+# Test builds only (the desktop `e2e` feature): KINANA_TEST_PI_PACKAGE_MANIFEST
+# may name a fake Pi package's pinned files. Never in a signed build.
+test-pi-manifest = []
+
 [dependencies]
 blake3.workspace = true
 rusqlite.workspace = true
@@ -15,3 +20,7 @@ zip.workspace = true
 serde_json.workspace = true
 url = "2.5"
 icu_properties = "2.4"
+
+[[example]]
+name = "classification_eval"
+test = true

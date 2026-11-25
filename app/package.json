@@ -1,6 +1,6 @@
 {
   "name": "kinana-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -17,7 +17,7 @@
     "test:release-isolation": "node tests/release-isolation.mjs",
     "build:native": "node scripts/build-native.mjs",
     "build:native:e2e": "node scripts/build-native.mjs e2e",
-    "test:unit": "node --experimental-strip-types --test tests/presentation.test.mjs tests/paths-reasons.test.mjs tests/scan-plan.test.mjs tests/classification-report.test.mjs"
+    "test:unit": "node --experimental-strip-types --test tests/presentation.test.mjs tests/paths-reasons.test.mjs tests/scan-plan.test.mjs tests/classification-report.test.mjs tests/batch-review.test.mjs tests/taxonomy-draft.test.mjs tests/audit-rules.test.mjs tests/audit-groups.test.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

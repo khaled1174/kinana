@@ -74,6 +74,7 @@ fn seed(vault: &Vault, id: &str, skill: &str) -> SkillMetadata {
     fs::write(root.join("assets/data.bin"), [0, 1, 2, 0xff]).unwrap();
     let metadata = SkillMetadata {
         proposal_source_changed: None,
+        classification_context: None,
         pinned: false,
         id: id.into(),
         content_hash: hash::hash_directory(&root).unwrap(),

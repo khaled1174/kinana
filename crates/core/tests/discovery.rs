@@ -30,6 +30,7 @@ impl Fixture {
         .unwrap();
         let metadata = SkillMetadata {
             proposal_source_changed: None,
+            classification_context: None,
             pinned: false,
             id: id.into(),
             content_hash: hash::hash_directory(&path).unwrap(),

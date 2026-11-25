@@ -4,7 +4,11 @@
 //! skill code, hooks, or instructions are executed, and links are never opened.
 
 use crate::{Audit, AuditFinding, Error, Result, hash};
+mod environment;
 mod evidence;
+mod forms;
+mod packages;
+mod precision;
 use std::fs::{self, Metadata};
 use std::path::{Component, Path, PathBuf};
 use yaml_rust2::{Yaml, YamlLoader};
@@ -35,7 +39,7 @@ impl Findings {
         } else {
             "secrets"
         };
-        self.record(rule, severity, path, reason, None, None, None);
+        self.record(rule, severity, path, reason, None, None, None, Vec::new());
     }
     #[allow(clippy::too_many_arguments)]
     fn record(
@@ -47,6 +51,7 @@ impl Findings {
         line: Option<usize>,
         end_line: Option<usize>,
         excerpt: Option<String>,
+        forms: Vec<String>,
     ) {
         self.severity = self.severity.max(severity);
         let strong = severity == Severity::Risky;
@@ -54,12 +59,15 @@ impl Findings {
         let budget = &mut self.retained_bytes[usize::from(strong)];
         let size = 256
             + 12 * path.as_os_str().len()
-            + 6 * (reason.len() + excerpt.as_ref().map_or(0, String::len));
+            + 6 * (reason.len()
+                + excerpt.as_ref().map_or(0, String::len)
+                + forms.iter().map(String::len).sum::<usize>());
         if *budget + size > 128 * 1024 {
             self.omitted += 1;
             return;
         }
         *budget += size;
+        let forced_delete = rule == "destructive" && reason == evidence::FORCED_DELETE;
         let reason = format!("{}: {reason}", path.display());
         if !self.reasons.contains(&reason) {
             self.reasons.push(reason);
@@ -68,17 +76,115 @@ impl Findings {
             rule: rule.into(),
             strength: if strong { "strong" } else { "weak" }.into(),
             level: if strong { "risky" } else { "review" }.into(),
-            reason_code: format!(
-                "AUDIT_{}_{}",
-                rule.to_ascii_uppercase(),
-                if strong { "STRONG" } else { "WEAK" }
-            ),
+            reason_code: if forced_delete {
+                "AUDIT_RECURSIVE_DELETE_STRONG".into()
+            } else {
+                format!(
+                    "AUDIT_{}_{}",
+                    rule.to_ascii_uppercase(),
+                    if strong { "STRONG" } else { "WEAK" }
+                )
+            },
             path: path.into(),
             line,
             end_line,
             excerpt,
+            forms,
         });
     }
+}
+
+/// Version of the audit rules; stored audits with a lower version were made by
+/// older rules and are re-audited only after an explicit preview and confirmation.
+pub const RULES_VERSION: u32 = 4;
+
+/// A stored audit level next to the level the current rules give.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LevelChange {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// What re-auditing every skill with the current rules would change. Nothing
+/// is written to compute it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RulesUpgrade {
+    pub rules_version: u32,
+    /// Stored audits made by older rules, legacy audits (version 0) included.
+    pub older: usize,
+    /// Skills whose level goes up, by id; shown first.
+    pub raised: Vec<LevelChange>,
+    pub lowered: Vec<LevelChange>,
+    pub unchanged: usize,
+}
+
+fn level_rank(level: &str) -> u8 {
+    match level {
+        "risky" => 3,
+        "review" => 2,
+        "clean" => 1,
+        _ => 0,
+    }
+}
+
+/// Count stored audits made by older rules. Reads only `meta/*.toml`: no
+/// skill, index or lock is opened and nothing is written, so it is safe at
+/// app start. A meta file that does not parse counts as older.
+pub fn older_rules(vault_root: &Path) -> Result<usize> {
+    let meta = vault_root.join("meta");
+    let entries = match fs::read_dir(&meta) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(&meta, error)),
+    };
+    let mut older = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error(&meta, error))?;
+        let path = entry.path();
+        let regular = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+        if !regular || path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let version = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+            .and_then(|value| value.get("audit")?.get("rules_version")?.as_integer())
+            .unwrap_or(0);
+        if version < i64::from(RULES_VERSION) {
+            older += 1;
+        }
+    }
+    Ok(older)
+}
+
+/// Compare every stored audit with the current rules without writing.
+pub fn rules_upgrade(vault: &crate::vault::Vault) -> Result<RulesUpgrade> {
+    let mut upgrade = RulesUpgrade {
+        rules_version: RULES_VERSION,
+        ..RulesUpgrade::default()
+    };
+    let mut records = vault.records()?;
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    for record in records {
+        crate::vault::validate_id(&record.id)?;
+        let stored = crate::edit::read_metadata(vault, &record.id)?.audit;
+        if stored.rules_version < RULES_VERSION {
+            upgrade.older += 1;
+        }
+        let current = audit_skill(&vault.root.join("skills").join(&record.id))?;
+        let change = LevelChange {
+            id: record.id,
+            from: stored.level.clone(),
+            to: current.level.clone(),
+        };
+        match level_rank(&current.level).cmp(&level_rank(&stored.level)) {
+            std::cmp::Ordering::Greater => upgrade.raised.push(change),
+            std::cmp::Ordering::Less => upgrade.lowered.push(change),
+            std::cmp::Ordering::Equal => upgrade.unchanged += 1,
+        }
+    }
+    Ok(upgrade)
 }
 
 /// Inspect every file in a skill as data and report the highest finding level.
@@ -116,7 +222,7 @@ pub fn audit_skill(path: &Path) -> Result<Audit> {
         }
         .into(),
         findings: findings.reasons,
-        rules_version: 2,
+        rules_version: RULES_VERSION,
         details: findings.details,
     })
 }
@@ -320,6 +426,11 @@ fn is_binary_executable(bytes: &[u8]) -> bool {
 }
 
 fn normalize_text(text: &str) -> String {
+    fold_text(text).to_lowercase()
+}
+
+/// `normalize_text` before lowercasing.
+fn fold_text(text: &str) -> String {
     text.replace("\\\r\n", "")
         .replace("\\\n", "")
         .chars()
@@ -336,8 +447,24 @@ fn normalize_text(text: &str) -> String {
             'ى' => Some('ي'),
             _ => Some(c),
         })
-        .collect::<String>()
-        .to_lowercase()
+        .collect()
+}
+
+/// `normalize_text` with the case of every ASCII letter kept (owner,
+/// 2026-11-24, r7 item 4: a camelCase boundary names a secret). It has the
+/// same characters at the same places as `normalize_text`, except ASCII
+/// letters: those keep their case, and an ASCII letter that comes from
+/// lowercasing another character (the Kelvin sign `K`) is a capital.
+fn normalize_keep_case(text: &str) -> String {
+    let mut out = String::new();
+    for c in fold_text(text).chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            out.extend(c.to_lowercase().map(|x| x.to_ascii_uppercase()));
+        }
+    }
+    out
 }
 
 fn words(text: &str) -> Vec<&str> {
@@ -379,6 +506,13 @@ fn sensitive_path(path: &Path) -> bool {
 }
 
 fn has_secret_access(text: &str, compact: &str, words: &[&str]) -> bool {
+    secret_access_except_references(text, compact, words) || has_variable_reference(text)
+}
+
+/// Every clause of the rules-version-2 secret test except the `$` clause.
+/// Rules version 3 runs these clauses unchanged (owner decision 2026-11-20,
+/// round 6); only matches that are a plain variable reference are dropped.
+fn secret_access_except_references(text: &str, compact: &str, words: &[&str]) -> bool {
     [
         ".ssh",
         ".aws/",
@@ -411,9 +545,13 @@ fn has_secret_access(text: &str, compact: &str, words: &[&str]) -> bool {
         ]
         .iter()
         .any(|needle| compact.contains(needle))
-        || text.as_bytes().windows(2).any(|pair| {
-            pair[0] == b'$' && (pair[1].is_ascii_alphabetic() || matches!(pair[1], b'_' | b'{'))
-        })
+}
+
+/// The `$` clause of the rules-version-2 secret test: any `$name` or `${`.
+fn has_variable_reference(text: &str) -> bool {
+    text.as_bytes().windows(2).any(|pair| {
+        pair[0] == b'$' && (pair[1].is_ascii_alphabetic() || matches!(pair[1], b'_' | b'{'))
+    })
 }
 
 // Bare prose such as "color token" is not a credential. Assignment/header
@@ -469,57 +607,6 @@ fn command_end(tokens: &[String], start: usize) -> usize {
         .take(80)
         .find(|(_, token)| matches!(token.as_str(), ";" | "&" | "|" | "\n"))
         .map_or(tokens.len().min(start + 80), |(index, _)| index)
-}
-
-fn has_destructive_command(tokens: &[String]) -> bool {
-    for (index, token) in tokens.iter().enumerate() {
-        let args = &tokens[index + 1..command_end(tokens, index + 1)];
-        match command_name(token) {
-            "rm" => {
-                let recursive = args.iter().any(|arg| {
-                    arg == "--recursive"
-                        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('r'))
-                });
-                let force = args.iter().any(|arg| {
-                    arg == "--force"
-                        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f'))
-                });
-                if recursive && force {
-                    return true;
-                }
-            }
-            "git" if args.iter().take(8).any(|arg| arg == "push") => {
-                if args.iter().any(|arg| {
-                    arg.starts_with("--force")
-                        || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('f'))
-                }) {
-                    return true;
-                }
-            }
-            "chmod"
-                if args
-                    .iter()
-                    .any(|arg| matches!(arg.as_str(), "777" | "0777" | "0o777" | "a+rwx")) =>
-            {
-                return true;
-            }
-            "remove-item"
-                if args.iter().any(|arg| arg == "-recurse")
-                    && args.iter().any(|arg| arg == "-force") =>
-            {
-                return true;
-            }
-            "rmdir" | "rd"
-                if args.iter().any(|arg| arg == "/s") && args.iter().any(|arg| arg == "/q") =>
-            {
-                return true;
-            }
-            "mkfs" | "mkfs.ext4" | "mkfs.apfs" | "diskpart" => return true,
-            "dd" if args.iter().any(|arg| arg.starts_with("of=/dev/")) => return true,
-            _ => {}
-        }
-    }
-    false
 }
 
 fn is_downloader(token: &str) -> bool {
@@ -800,6 +887,7 @@ fn inspect_frontmatter(text: &str, relative: &Path, findings: &mut Findings) {
                     line,
                     line,
                     None,
+                    Vec::new(),
                 );
             }
         }
@@ -922,7 +1010,14 @@ pub fn refresh(
     for id in selected {
         crate::vault::validate_id(&id)?;
         let mut metadata = crate::edit::read_metadata(vault, &id)?;
-        metadata.audit = audit_skill(&vault.root.join("skills").join(&id))?;
+        let current = audit_skill(&vault.root.join("skills").join(&id))?;
+        // Every skill is re-audited; only an audit that differs is written, so
+        // an unchanged skill's metadata keeps its bytes and the commit holds
+        // the actual changes only.
+        if serde_json::to_value(&metadata.audit).ok() == serde_json::to_value(&current).ok() {
+            continue;
+        }
+        metadata.audit = current;
         updates.insert(id, metadata);
     }
     crate::edit::apply(

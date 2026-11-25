@@ -137,20 +137,38 @@ pub enum Commands {
         all: bool,
         #[arg(long)]
         pending: bool,
-        #[arg(long, default_value = "auto", value_parser = ["auto", "keywords", "claude", "codex"])]
+        #[arg(long, default_value = "auto", value_parser = ["auto", "keywords", "claude", "codex", "pi"])]
         agent: String,
+        /// Claude model alias or full model name for this run.
+        #[arg(long)]
+        model: Option<String>,
+        /// Claude effort override for this run.
+        #[arg(long)]
+        effort: Option<String>,
+        /// Emit only Claude model and stop metadata for diagnosis.
+        #[arg(long, requires = "json")]
+        claude_events: bool,
         /// Confirm the displayed batch count before provider calls.
         #[arg(long)]
         yes: bool,
         /// Send complete SKILL.md for one explicit skill, including long files.
         #[arg(long, conflicts_with_all = ["all", "pending"])]
         full: bool,
+        /// Confirm Pi as the `auto` fallback: the token from the preview or
+        /// from a run that stopped with PI_CONFIRMATION_REQUIRED.
+        #[arg(long)]
+        confirm: Option<String>,
     },
     /// Show the description difference or explicitly accept/reject a proposal.
+    /// Several IDs with --accept preview the batch; --confirm accepts it in one commit.
     Review {
-        id: String,
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
         #[arg(long, conflicts_with_all = ["reject", "original"])]
         accept: bool,
+        /// Accept exactly the previewed batch (token from the preview).
+        #[arg(long, requires = "accept")]
+        confirm: Option<String>,
         #[arg(long, conflicts_with = "original")]
         reject: bool,
         #[arg(long)]
@@ -214,6 +232,14 @@ pub enum Commands {
     Bundle {
         #[command(subcommand)]
         command: BundleCommands,
+    },
+    /// Preview re-auditing every skill with the current audit rules: how many
+    /// levels go down or up, raised skills first. With --confirm, re-audit all
+    /// of them in one commit that `kinana undo` reverts. Nothing changes otherwise.
+    RefreshAudit {
+        /// Confirm the exact preview token.
+        #[arg(long)]
+        confirm: Option<String>,
     },
     /// Revert the last vault change using Git, preserving history.
     Undo,

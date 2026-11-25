@@ -55,6 +55,67 @@ pub struct BoxConfig {
     pub detected_agents: Vec<String>,
     #[serde(default)]
     pub scan_paths: Vec<PathBuf>,
+    /// Only what the user changed (0.3); absent reads the defaults in code.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::taxonomy::Definitions::is_empty"
+    )]
+    pub definitions: crate::taxonomy::Definitions,
+    /// Pi as an experimental classifier (0.3); off unless the user enables it.
+    #[serde(default, skip_serializing_if = "PiSettings::is_default")]
+    pub classification_pi: PiSettings,
+    #[serde(default, skip_serializing_if = "ClaudeSettings::is_default")]
+    pub classification_claude: ClaudeSettings,
+    /// 0.3 (owner 2026-11-24; r5, widened in r6): after a classification,
+    /// the proposed descriptions of skills that are not risky in the audit
+    /// are approved in one commit of their own. On unless the user turns it off; written to
+    /// box.toml only when off.
+    #[serde(default = "auto_approve", skip_serializing_if = "is_on")]
+    pub auto_approve_descriptions: bool,
+}
+fn auto_approve() -> bool {
+    true
+}
+fn is_on(value: &bool) -> bool {
+    *value
+}
+
+/// Empty values delegate model and effort selection to Claude Code.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClaudeSettings {
+    pub model: String,
+    pub effort: String,
+}
+
+impl ClaudeSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// `[classification_pi]` in box.toml. Enabled Pi needs a provider; an empty
+/// model is Pi's built-in default for that provider and an empty thinking
+/// level is Pi's own. `account` only chooses the note shown with an estimate:
+/// Kinana never reads Pi's credentials.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PiSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub thinking: String,
+    /// `subscription`, `api_key`, or empty for not specified.
+    #[serde(default)]
+    pub account: String,
+}
+impl PiSettings {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 impl Default for BoxConfig {
     fn default() -> Self {
@@ -67,6 +128,10 @@ impl Default for BoxConfig {
             stages: default_stages(),
             detected_agents: vec![],
             scan_paths: vec![],
+            definitions: Default::default(),
+            classification_pi: Default::default(),
+            auto_approve_descriptions: true,
+            classification_claude: Default::default(),
         }
     }
 }
@@ -219,6 +284,10 @@ pub struct AuditFinding {
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub excerpt: Option<String>,
+    /// 0.3 (r5): for a secrets finding, the variable names and access forms
+    /// on its lines (`$CODEX_HOME`, `os.environ.get("X")`), never a value.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forms: Vec<String>,
 }
 fn unscanned() -> String {
     "unscanned".into()
@@ -256,6 +325,53 @@ pub struct SkillMetadata {
     pub proposal: Option<ClassificationProposal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_source_changed: Option<bool>,
+    /// Template version and category reason of the last agent classification
+    /// (0.3). Absent for keyword or pre-0.3 classifications, and whenever the
+    /// classification it was written for has changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification_context: Option<ClassificationContext>,
+}
+
+/// Stored in `[classification_context]`, a table the 0.2 beta ignores and
+/// keeps. `binds` hashes the classification fields it was written with
+/// ([`context_binding`]): when a version that does not know this table
+/// reclassifies or the category is edited, the hash no longer matches and the
+/// stale reason is ignored on read and dropped on the next write.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClassificationContext {
+    pub prompt_version: u32,
+    #[serde(default)]
+    pub category_reason: String,
+    #[serde(default, skip_serializing)]
+    pub binds: String,
+}
+
+/// Hash of the classification fields a context belongs to. Dimensions, tags
+/// and overlaps are left out: editing them does not change why the category
+/// was chosen.
+pub fn context_binding(classification: &Classification) -> String {
+    let fields = serde_json::json!([
+        classification.category,
+        classification.role,
+        classification.when_to_use,
+        classification.when_not,
+        classification.classified_by,
+        classification.classified_from,
+    ]);
+    format!(
+        "c1.{}",
+        blake3::hash(fields.to_string().as_bytes()).to_hex()
+    )
+}
+
+#[derive(Deserialize)]
+struct StoredContext {
+    #[serde(default)]
+    prompt_version: u32,
+    #[serde(default)]
+    category_reason: String,
+    #[serde(default)]
+    binds: String,
 }
 
 /// A metadata file as it is stored. The `stack` and `stage` of a waiting
@@ -286,6 +402,10 @@ struct StoredSkillMetadata {
     proposal_source_changed: Option<bool>,
     #[serde(default)]
     proposal_dimensions: Option<ProposalDimensions>,
+    /// Read leniently: a malformed table (0.2 ignores it) is dropped instead
+    /// of making the whole skill unreadable.
+    #[serde(default)]
+    classification_context: Option<toml::Value>,
 }
 #[derive(Deserialize)]
 struct ProposalDimensions {
@@ -293,6 +413,9 @@ struct ProposalDimensions {
     stack: Vec<String>,
     #[serde(default)]
     stage: Vec<String>,
+    /// 0.3. The 0.2 beta ignores this key and rewrites the whole table.
+    #[serde(default)]
+    category_reason: String,
 }
 impl From<StoredSkillMetadata> for SkillMetadata {
     fn from(stored: StoredSkillMetadata) -> Self {
@@ -302,8 +425,19 @@ impl From<StoredSkillMetadata> for SkillMetadata {
         if let (Some(proposal), Some(dimensions)) = (&mut proposal, stored.proposal_dimensions) {
             proposal.stack = dimensions.stack;
             proposal.stage = dimensions.stage;
+            proposal.category_reason = dimensions.category_reason;
         }
+        let classification_context = stored
+            .classification_context
+            .and_then(|value| value.try_into::<StoredContext>().ok())
+            .filter(|context| context.binds == context_binding(&stored.classification))
+            .map(|context| ClassificationContext {
+                prompt_version: context.prompt_version,
+                category_reason: context.category_reason,
+                binds: context.binds,
+            });
         Self {
+            classification_context,
             id: stored.id,
             pinned: stored.pinned,
             content_hash: stored.content_hash,
@@ -622,6 +756,11 @@ pub struct ClassificationProposal {
     pub improved_description: String,
     pub overlaps_with: Vec<String>,
     pub confidence: f64,
+    /// Why the model chose `category` (0.3, at most 160 characters). Stored
+    /// in `[proposal_dimensions]` beside `[proposal]`, whose unknown keys the
+    /// beta rejects, and with the classification in `[classification_context]`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category_reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -633,6 +772,13 @@ pub struct ClassifyOptions {
     pub confirmed: bool,
     pub dry_run: bool,
     pub full: bool,
+    pub claude_model: Option<String>,
+    pub claude_effort: Option<String>,
+    pub claude_events: bool,
+    /// 0.3: the token of the Pi confirmation the user accepted
+    /// ([`PiConfirmation::token`]). Without it `auto` stops before its first
+    /// Pi call with `PI_CONFIRMATION_REQUIRED`.
+    pub pi_confirmation: Option<String>,
 }
 impl Default for ClassifyOptions {
     fn default() -> Self {
@@ -640,10 +786,16 @@ impl Default for ClassifyOptions {
             ids: vec![],
             all: false,
             pending: false,
-            agent: "auto".into(),
+            // Keywords by default: `auto` starts Claude, so callers choose it
+            // explicitly (the CLI passes its own default).
+            agent: "keywords".into(),
             confirmed: false,
             dry_run: false,
             full: false,
+            claude_model: None,
+            claude_effort: None,
+            claude_events: false,
+            pi_confirmation: None,
         }
     }
 }
@@ -673,6 +825,11 @@ pub struct ClassifyReport {
     pub estimated_tokens: TokenEstimate,
     pub agent_calls: usize,
     pub items: Vec<ClassifiedItem>,
+    /// Skills left untouched after a skill-specific failure.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<SkippedClassification>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub claude_events: Vec<ClaudeEventSummary>,
     pub committed: bool,
     pub build: BuildReport,
     pub warnings: Vec<String>,
@@ -680,6 +837,69 @@ pub struct ClassifyReport {
     /// limit or credit error). Completed skills were saved in one commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<ClassifyStop>,
+    /// 0.3: for `auto` and named agents, each provider in order and whether
+    /// it will be (or was) used. Absent for keywords.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderStatus>,
+    /// 0.3: what the user confirms before `auto` calls Pi: in the preview of
+    /// a run that may use Pi, and when a run stopped with
+    /// `PI_CONFIRMATION_REQUIRED` (then for the remaining skills).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_confirmation: Option<PiConfirmation>,
+    /// 0.3 (r5): the descriptions approved automatically after this run,
+    /// with the commit that holds them. Absent when none was approved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_approved: Option<crate::review::AutoApproval>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkippedClassification {
+    pub id: String,
+    pub agent: String,
+    pub reason_code: String,
+    pub attempts: usize,
+}
+
+/// Opt-in diagnostics. Neither prompt nor response text is retained.
+#[derive(Debug, Serialize)]
+pub struct ClaudeEventSummary {
+    pub id: String,
+    pub attempt: usize,
+    pub model: Option<String>,
+    pub stop_reason: Option<String>,
+    pub event_type: Option<String>,
+    pub refused: bool,
+    pub unparsed_tool_input: bool,
+}
+
+/// The explicit confirmation before `auto` sends a skill to Pi (owner,
+/// 2026-11-18). The token binds the Pi settings and the skills, so a changed
+/// setting or selection needs a new confirmation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PiConfirmation {
+    pub provider: String,
+    /// The model Pi is given: the chosen one, or Pi's built-in default for
+    /// the provider when the settings leave it to Pi (`model_default`).
+    pub model: String,
+    /// The settings leave the model to Pi's default for the provider (0.3,
+    /// r5); `model` is that default, passed to Pi explicitly.
+    pub model_default: bool,
+    pub skills: usize,
+    /// One call per skill, plus one retry each: the most Pi could make.
+    pub max_calls: usize,
+    pub token: String,
+}
+
+/// One classification provider in a run (0.3). `status`: `planned`,
+/// `failed`, `disabled` or `unsupported`; `reason_code` says why it is not
+/// used. No provider ever falls back to keywords silently.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderStatus {
+    pub agent: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub planned_calls: usize,
 }
 
 /// Why a classification run stopped before its last skill, and how far it got.
@@ -692,6 +912,9 @@ pub struct ClassifyStop {
     pub classified: usize,
     /// Skills not classified in this run, in order.
     pub remaining: Vec<String>,
+    /// For `AGENT_AUTO_UNAVAILABLE`: every provider and why it was not used.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -717,6 +940,8 @@ pub struct TokenEstimate {
     pub total_input_tokens: u64,
     pub retry_limit_input_tokens: u64,
     pub calibration: Option<TokenCalibration>,
+    #[serde(default, skip_serializing_if = "ClaudeSettings::is_default")]
+    pub claude: ClaudeSettings,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildItem {
@@ -758,6 +983,28 @@ pub struct ReviewReport {
     pub proposed: Option<String>,
     pub active: String,
     pub decision: String,
+    pub dry_run: bool,
+    pub committed: bool,
+    pub build: BuildReport,
+}
+
+/// One pending description in a batch accept (contract version 9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BatchReviewItem {
+    pub id: String,
+    pub original: String,
+    pub current: String,
+    pub proposed: String,
+    pub active: String,
+}
+/// `review --accept <id> <id>...`: every selected proposal is checked before
+/// any write and accepted in one commit, undone as one with `undo`.
+#[derive(Debug, Serialize)]
+pub struct BatchReviewReport {
+    pub decision: String,
+    pub items: Vec<BatchReviewItem>,
+    pub preview_token: String,
+    pub requires_confirmation: bool,
     pub dry_run: bool,
     pub committed: bool,
     pub build: BuildReport,

@@ -80,6 +80,7 @@ fn proposal(s: &Sandbox) {
         improved_description: "Compare API contracts before implementing endpoints.".into(),
         overlaps_with: vec!["alternate".into()],
         confidence: 0.9,
+        category_reason: String::new(),
     });
     edit::apply(
         &v,
@@ -345,6 +346,23 @@ command_contracts! {
         fs::write(&file, format!("{}\nVariant body\n", fs::read_to_string(&file).unwrap())).unwrap();
         checked(&s, "scan --import", &["scan", variant.to_str().unwrap(), "--import"], 0);
         assert!(!run(&["show", "api"], 0)["variants"].as_array().unwrap().is_empty());
+        // Contract 11 (owner, 2026-11-24): a secrets finding carries the
+        // names and forms on its lines, never a value.
+        let env = s.root.join("source-env");
+        fs::create_dir_all(env.join("scripts")).unwrap();
+        fs::write(env.join("SKILL.md"), "---\nname: env\ndescription: Print the token\n---\n# Env\n").unwrap();
+        fs::write(env.join("scripts/run.sh"), "echo \"$GITHUB_TOKEN\"\n").unwrap();
+        checked(&s, "add", &["add", env.to_str().unwrap(), "--allow-risky"], 0);
+        let shown = run(&["show", "env"], 0);
+        let secrets = shown["metadata"]["audit"]["details"].as_array().unwrap().iter()
+            .filter(|d| d["rule"] == "secrets" && d["path"] == "scripts/run.sh")
+            .collect::<Vec<_>>();
+        assert!(!secrets.is_empty(), "{shown}");
+        assert!(secrets.iter().all(|d| d["forms"] == json!(["$GITHUB_TOKEN"])), "{shown}");
+        // Absent, not empty, on a finding of another rule.
+        assert!(shown["metadata"]["audit"]["details"].as_array().unwrap().iter()
+            .filter(|d| d["rule"] != "secrets")
+            .all(|d| d.get("forms").is_none()), "{shown}");
     },
     classify_json: "classify" => |s, run| {
         setup(&s);
@@ -506,6 +524,41 @@ command_contracts! {
         setup(&s); checked(&s,"error",&["update","api"],2);
         // Successful preview/confirmation shapes use a real repository transport in source_updates.rs.
     },
+    refresh_audit_json: "refresh-audit" => |s, run| {
+        setup(&s);
+        let current = run(&["refresh-audit"], 0);
+        assert_eq!(current["older"], 0);
+        assert_eq!(current["changed"], false);
+        // An audit stored by older rules: preview, then confirm, then undo.
+        let meta = s.vault.join("meta/api.toml");
+        let mut value: toml::Value = toml::from_str(&fs::read_to_string(&meta).unwrap()).unwrap();
+        value["audit"] = toml::from_str::<toml::Value>(
+            "level='risky'\nfindings=['older reason']\nrules_version=2\n",
+        )
+        .unwrap();
+        fs::write(&meta, toml::to_string(&value).unwrap()).unwrap();
+        kinana_core::gitlog::commit_paths(&s.vault, "Older audit", &["meta/api.toml".into()]).unwrap();
+        let before = fs::read(&meta).unwrap();
+        let preview = run(&["refresh-audit"], 2);
+        assert_eq!(preview["older"], 1);
+        assert_eq!(preview["rules_version"], kinana_core::audit::RULES_VERSION);
+        assert_eq!(preview["lowered"][0]["id"], "api");
+        assert_eq!(preview["lowered"][0]["from"], "risky");
+        assert_eq!(preview["requires_confirmation"], true);
+        assert_eq!(fs::read(&meta).unwrap(), before, "a preview writes nothing");
+        let token = preview["preview_token"].as_str().unwrap().to_owned();
+        let dry = run(&["refresh-audit", "--confirm", &token, "--dry-run"], 0);
+        assert_eq!(dry["committed"], false);
+        assert_eq!(fs::read(&meta).unwrap(), before);
+        checked(&s, "error", &["refresh-audit", "--confirm", "not-the-token"], 1);
+        assert_eq!(fs::read(&meta).unwrap(), before);
+        let done = run(&["refresh-audit", "--confirm", &token], 0);
+        assert_eq!(done["committed"], true);
+        let stored = kinana_core::edit::read_metadata(&vault(&s), "api").unwrap();
+        assert_eq!(stored.audit.rules_version, kinana_core::audit::RULES_VERSION);
+        checked(&s, "undo", &["undo"], 0);
+        assert_eq!(fs::read(&meta).unwrap(), before, "one commit, reverted by undo");
+    },
     undo_json: "undo" => |s, run| {
         setup(&s);
         run(&["undo", "--dry-run"], 0);
@@ -541,10 +594,13 @@ fn every_cli_command_has_a_documented_and_exercised_contract() {
     }
     let doc = contract::document();
     assert_eq!(doc["x-contract-version"], 8);
-    // Contract 8 ships with 0.2.0 and is pinned there (owner, round 8): a new
-    // release must restate which contract it ships, and a shape change after
-    // 0.2.0 is contract 9.
-    assert_eq!(doc["x-released-in"], env!("CARGO_PKG_VERSION"));
+    // Keep the v8 baseline pinned and validate the shipped contract separately.
+    assert_eq!(doc["x-released-in"], "0.2.0");
+    assert_eq!(doc["x-current-release"]["contract"], 11);
+    assert_eq!(
+        doc["x-current-release"]["released-in"],
+        env!("CARGO_PKG_VERSION")
+    );
     let commands = doc["x-commands"].as_object().unwrap();
     let documented: BTreeSet<_> = commands.keys().map(String::as_str).collect();
     let exercised: BTreeSet<_> = COVERED_COMMANDS.iter().copied().collect();
@@ -754,10 +810,13 @@ fn value_type(value: &Value, item: &str) -> String {
 fn version_8_prose_schema_and_real_output_agree_field_by_field() {
     let doc = contract::document();
     assert_eq!(doc["x-contract-version"], 8);
-    // Contract 8 ships with 0.2.0 and is pinned there (owner, round 8): a new
-    // release must restate which contract it ships, and a shape change after
-    // 0.2.0 is contract 9.
-    assert_eq!(doc["x-released-in"], env!("CARGO_PKG_VERSION"));
+    // Keep the v8 baseline pinned and validate the shipped contract separately.
+    assert_eq!(doc["x-released-in"], "0.2.0");
+    assert_eq!(doc["x-current-release"]["contract"], 11);
+    assert_eq!(
+        doc["x-current-release"]["released-in"],
+        env!("CARGO_PKG_VERSION")
+    );
     let types = [
         (
             "BriefCatalog",

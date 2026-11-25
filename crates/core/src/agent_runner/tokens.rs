@@ -17,6 +17,8 @@ pub(crate) fn estimate(
     allowed: &AllowedValues<'_>,
     existing: &[SkillRecord],
     provider_calls: usize,
+    guide: Option<&str>,
+    uncalibrated: bool,
 ) -> Result<TokenEstimate> {
     if provider_calls == 0 {
         return Ok(TokenEstimate::default());
@@ -43,14 +45,22 @@ pub(crate) fn estimate(
         &data,
         &proposal_schema(allowed).to_string(),
         "skill-00000000000000000000000000000000",
+        guide,
     );
-    // The rendered prompt already contains the dimension guidance, both lists
-    // and the ten-field schema. The second schema copy travels as the
-    // `--json-schema` tool definition inside the calibrated CLI overhead, which
-    // was measured with the eight-field schema; add what the two fields add.
-    let base_per_call = calibration.cli_overhead_tokens
-        + (prompt.len() as u64).div_ceil(4)
-        + schema_dimension_bytes(allowed).div_ceil(4);
+    // The rendered prompt already contains the dimension guidance, both lists,
+    // the guide and the eleven-field schema. The second schema copy travels as
+    // the `--json-schema` tool definition inside the calibrated CLI overhead,
+    // which was measured with the eight-field schema; add what the three
+    // fields added since (stack, stage, category_reason) add.
+    // Pi (0.3) has no calibration yet: the estimate is the prompt alone, with
+    // no CLI overhead, and says so by carrying no calibration.
+    let base_per_call = if uncalibrated {
+        (prompt.len() as u64).div_ceil(4)
+    } else {
+        calibration.cli_overhead_tokens
+            + (prompt.len() as u64).div_ceil(4)
+            + schema_dimension_bytes(allowed).div_ceil(4)
+    };
     let fixed_tokens_total = skills
         .iter()
         .cycle()
@@ -77,6 +87,7 @@ pub(crate) fn estimate(
         skill_tokens_total,
         total_input_tokens,
         retry_limit_input_tokens: total_input_tokens.saturating_mul(2),
-        calibration: Some(calibration),
+        calibration: (!uncalibrated).then_some(calibration),
+        claude: Default::default(),
     })
 }

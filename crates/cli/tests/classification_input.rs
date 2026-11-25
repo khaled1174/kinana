@@ -165,12 +165,15 @@ fn accepted_provider_results_record_full_or_excerpt_and_keep_source_bytes_unchan
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     sandbox.initialize();
+    // These cover classification and the manual review, not r5's
+    // automatic approval (crates/cli/tests/auto_approval.rs).
+    support::manual_review(&sandbox.vault);
     let source = import(&sandbox, "long", true);
     let original = snapshot(&source);
     let bin = sandbox.root.join("bin");
     fs::create_dir(&bin).unwrap();
     let trace = sandbox.root.join("prompt.txt");
-    let proposal = json!({"category":"web-frontend","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Review React component accessibility","overlaps_with":[],"confidence":0.9});
+    let proposal = json!({"category":"web-frontend","category_reason":"Reviews browser components.","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Review React component accessibility","overlaps_with":[],"confidence":0.9});
     let script = r#"#!/usr/bin/python3
 import json, sys
 if sys.argv[1:] == ['--help']:
@@ -181,7 +184,7 @@ else:
     with open(@TRACE@, 'w') as file: file.write(sys.stdin.read())
     print(json.dumps({'type':'system','subtype':'init','tools':['StructuredOutput']}))
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'terminal_reason':'completed','structured_output':@PROPOSAL@}))
-"#.replace("@HELP@", &serde_json::to_string(include_str!("../../../docs/evidence/phase-3/claude-help.txt")).unwrap())
+"#.replace("@HELP@", &serde_json::to_string(include_str!("../../../tests/fixtures/classification/claude-help.txt")).unwrap())
         .replace("@TRACE@", &serde_json::to_string(&trace.to_string_lossy()).unwrap())
         .replace("@PROPOSAL@", &proposal.to_string());
     fs::write(bin.join("claude"), script).unwrap();
@@ -248,6 +251,9 @@ fn reclassification_keeps_approved_description_and_dist_until_the_next_review() 
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     sandbox.initialize();
+    // These cover classification and the manual review, not r5's
+    // automatic approval (crates/cli/tests/auto_approval.rs).
+    support::manual_review(&sandbox.vault);
     let source = import(&sandbox, "approved", false);
     let bin = sandbox.root.join("proposal-provider");
     fs::create_dir(&bin).unwrap();
@@ -264,7 +270,7 @@ else:
         proposal = json.load(file)
     print(json.dumps({'type':'system','subtype':'init','tools':['StructuredOutput']}))
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':proposal}))
-"#.replace("@HELP@", &serde_json::to_string(include_str!("../../../docs/evidence/phase-3/claude-help.txt")).unwrap())
+"#.replace("@HELP@", &serde_json::to_string(include_str!("../../../tests/fixtures/classification/claude-help.txt")).unwrap())
         .replace("@RESPONSE@", &serde_json::to_string(&response.to_string_lossy()).unwrap());
     fs::write(bin.join("claude"), script).unwrap();
     fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -291,7 +297,7 @@ else:
         assert_eq!(report["items"][0]["classified_by"], "claude");
         report
     };
-    let mut proposal = json!({"category":"web-frontend","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Approved React accessibility description","overlaps_with":[],"confidence":0.9});
+    let mut proposal = json!({"category":"web-frontend","category_reason":"Reviews browser components.","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Approved React accessibility description","overlaps_with":[],"confidence":0.9});
     fs::write(&response, proposal.to_string()).unwrap();
     classify();
     output(&sandbox, &["review", "approved", "--accept", "--json"]);
@@ -338,7 +344,10 @@ else:
 
 #[cfg(unix)]
 #[test]
-fn model_failure_prints_a_visible_keyword_fallback_warning_in_text_and_json_modes() {
+/// 0.3 (owner, 2026-11-18): Claude requested by name never falls back to
+/// keywords. A failed model call stops the run with a fixed code and exit 2,
+/// and nothing is written.
+fn model_failure_with_claude_named_stops_without_keywords_in_text_and_json_modes() {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     sandbox.initialize();
@@ -358,7 +367,7 @@ else:
     .replace(
         "@HELP@",
         &serde_json::to_string(include_str!(
-            "../../../docs/evidence/phase-3/claude-help.txt"
+            "../../../tests/fixtures/classification/claude-help.txt"
         ))
         .unwrap(),
     );
@@ -368,6 +377,8 @@ else:
         std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
+    let meta = sandbox.vault.join("meta/warning-fixture.toml");
+    let before = fs::read(&meta).unwrap();
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_kinana"));
         command
@@ -380,20 +391,26 @@ else:
             command.arg("--json");
         }
         let output = command.output().unwrap();
-        assert!(output.status.success());
+        assert_eq!(output.status.code(), Some(2));
         let warning = String::from_utf8(output.stderr).unwrap();
-        assert!(warning.contains("Warning: warning-fixture:"), "{warning}");
-        assert!(warning.contains("keyword fallback"), "{warning}");
         assert!(
-            warning.contains("no model proposal was accepted"),
+            warning.contains("Classification stopped (AGENT_CLAUDE_UNAVAILABLE)"),
             "{warning}"
         );
+        assert!(warning.contains("(claude: AGENT_"), "{warning}");
+        assert!(!warning.contains("keyword fallback"), "{warning}");
         if json {
             let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["items"][0]["classified_by"], "keywords");
-            assert_eq!(report["items"][0]["proposal_created"], false);
-            assert_eq!(report["items"][0]["attempts"], 1);
+            assert_eq!(report["items"], serde_json::json!([]));
+            assert_eq!(report["agent_calls"], 1);
+            assert_eq!(report["committed"], false);
+            assert_eq!(report["stopped"]["reason_code"], "AGENT_CLAUDE_UNAVAILABLE");
+            assert_eq!(
+                report["stopped"]["remaining"],
+                serde_json::json!(["warning-fixture"])
+            );
         }
+        assert_eq!(fs::read(&meta).unwrap(), before, "nothing was written");
     }
 }
 
@@ -421,7 +438,7 @@ else:
     .replace(
         "@HELP@",
         &serde_json::to_string(include_str!(
-            "../../../docs/evidence/phase-3/claude-help.txt"
+            "../../../tests/fixtures/classification/claude-help.txt"
         ))
         .unwrap(),
     )
@@ -470,13 +487,16 @@ fn limit_batch(before_init: bool) {
     use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     sandbox.initialize();
+    // These cover classification and the manual review, not r5's
+    // automatic approval (crates/cli/tests/auto_approval.rs).
+    support::manual_review(&sandbox.vault);
     for id in ["a-first", "b-second", "c-third"] {
         import(&sandbox, id, false);
     }
     let bin = sandbox.root.join("limited-provider");
     fs::create_dir(&bin).unwrap();
     let calls = sandbox.root.join("calls.txt");
-    let proposal = json!({"category":"web-frontend","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Review React component accessibility","overlaps_with":[],"confidence":0.9});
+    let proposal = json!({"category":"web-frontend","category_reason":"Reviews browser components.","stack":["react"],"stage":["review"],"tags":["react"],"role":"Review UI","when_to_use":"Before UI changes","when_not":"Backend work","improved_description":"Review React component accessibility","overlaps_with":[],"confidence":0.9});
     let script = r#"#!/usr/bin/python3
 import json, sys
 if sys.argv[1:] == ['--help']:
@@ -500,7 +520,7 @@ else:
 "#
     .replace(
         "@HELP@",
-        &serde_json::to_string(include_str!("../../../docs/evidence/phase-3/claude-help.txt"))
+        &serde_json::to_string(include_str!("../../../tests/fixtures/classification/claude-help.txt"))
             .unwrap(),
     )
     .replace("@EARLY@", if before_init {"True"} else {"False"})
@@ -535,8 +555,10 @@ else:
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(result.status.success(), "{stderr}");
+    // A named agent's stop asks the user what next: exit 2 (owner, 2026-11-18).
+    assert_eq!(result.status.code(), Some(2), "{stderr}");
     let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["stopped"]["providers"][0]["status"], "failed");
     // One accepted call, then one call that hit the limit; nothing after it.
     assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(), 2);
     assert_eq!(report["agent_calls"], 2, "{report}");
@@ -564,12 +586,18 @@ else:
     assert_eq!(report["items"][0]["proposal_created"], true);
     // Exactly one new commit, holding only the completed skill.
     assert_eq!(
-        git(&["rev-list", "--count", "HEAD"]).trim().parse::<u32>().unwrap(),
+        git(&["rev-list", "--count", "HEAD"])
+            .trim()
+            .parse::<u32>()
+            .unwrap(),
         commits_before.trim().parse::<u32>().unwrap() + 1
     );
     let changed = git(&["show", "--name-only", "--format=", "HEAD"]);
     assert!(changed.contains("meta/a-first.toml"), "{changed}");
-    assert!(!changed.contains("b-second") && !changed.contains("c-third"), "{changed}");
+    assert!(
+        !changed.contains("b-second") && !changed.contains("c-third"),
+        "{changed}"
+    );
     let first: toml::Value =
         toml::from_str(&fs::read_to_string(sandbox.vault.join("meta/a-first.toml")).unwrap())
             .unwrap();

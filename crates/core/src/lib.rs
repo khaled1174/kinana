@@ -40,6 +40,7 @@ pub mod sources;
 pub mod state;
 pub mod status;
 pub mod suggest;
+pub mod taxonomy;
 pub mod unuse;
 pub mod vault;
 pub use error::{Error, Result};

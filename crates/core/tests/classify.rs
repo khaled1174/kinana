@@ -306,6 +306,14 @@ fn whole_vault_confirmation_and_stale_estimates_are_rejected_before_changes() ->
             .code,
         "CLASSIFY_ESTIMATE_CHANGED"
     );
+    stale.total_input_tokens -= 1;
+    options.claude_model = Some("haiku".into());
+    assert_eq!(
+        classify::classify_confirmed(&vault, &options, &stale, &control)
+            .unwrap_err()
+            .code,
+        "CLASSIFY_ESTIMATE_CHANGED"
+    );
     assert_eq!(control.progress().completed, 0);
     assert_eq!(snapshot(&temp.0)?, before);
     Ok(())
@@ -424,26 +432,57 @@ fn pending_selects_only_pending_classification_and_an_empty_selection_is_a_noop(
     Ok(())
 }
 
+/// 0.3, batch 3. In process, only what starts no agent: Codex is refused
+/// before any read, and an `auto` preview plans Claude with Codex listed as
+/// unsupported. The `auto` stop itself is tested through the CLI with a fake
+/// Claude, never with whatever `claude` this machine has.
 #[test]
-fn unavailable_safe_auto_and_codex_adapters_fall_back_with_zero_model_calls() -> Result<()> {
+fn codex_is_refused_before_anything_and_an_auto_preview_plans_claude_only() -> Result<()> {
     let temp = Temp::new()?;
     let vault = temp.seed(&[("fixture", "React HTML CSS.")])?;
-    for agent in ["auto", "codex"] {
-        let report = classify::classify(
+    let before = snapshot(&temp.0)?;
+    for dry_run in [true, false] {
+        let error = classify::classify(
             &vault,
             &ClassifyOptions {
-                agent: agent.into(),
+                agent: "codex".into(),
+                dry_run,
                 ..keywords(&["fixture"])
             },
-        )?;
-        assert_eq!(report.agent_calls, 0);
-        assert_eq!(report.estimated_agent_calls, 0);
-        assert_eq!(report.items[0].category, "web-frontend");
-        assert_eq!(report.items[0].classified_by, "keywords");
-        assert_eq!(report.items[0].attempts, 0);
-        assert!(!report.items[0].warnings.is_empty());
-        assert!(!report.items[0].proposal_created);
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "AGENT_CODEX_UNSUPPORTED");
+        assert!(error.needs_decision);
+        assert!(error.message.contains("cannot guarantee"));
+        assert_eq!(snapshot(&temp.0)?, before);
     }
+    let preview = classify::classify(
+        &vault,
+        &ClassifyOptions {
+            agent: "auto".into(),
+            dry_run: true,
+            ..keywords(&["fixture"])
+        },
+    )?;
+    assert_eq!(preview.estimated_agent_calls, 1);
+    assert_eq!(preview.agent_calls, 0);
+    assert_eq!(
+        preview
+            .providers
+            .iter()
+            .map(|p| (p.agent.as_str(), p.status.as_str(), p.planned_calls))
+            .collect::<Vec<_>>(),
+        [
+            ("claude", "planned", 1),
+            ("pi", "disabled", 0),
+            ("codex", "unsupported", 0)
+        ]
+    );
+    assert_eq!(
+        preview.providers[2].reason_code.as_deref(),
+        Some("AGENT_CODEX_UNSUPPORTED")
+    );
+    assert_eq!(snapshot(&temp.0)?, before);
     Ok(())
 }
 
@@ -491,6 +530,7 @@ fn keyword_reclassification_preserves_approved_description_and_unknown_metadata(
         improved_description: "Unreviewed video text.".into(),
         overlaps_with: vec![],
         confidence: 0.8,
+        category_reason: String::new(),
     });
     let original_metadata = metadata.clone();
     let path = vault.root.join("meta/fixture.toml");

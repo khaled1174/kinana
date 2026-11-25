@@ -68,6 +68,7 @@ fn proposal(text: &str) -> ClassificationProposal {
         improved_description: text.into(),
         overlaps_with: Vec::new(),
         confidence: 0.9,
+        category_reason: String::new(),
     }
 }
 

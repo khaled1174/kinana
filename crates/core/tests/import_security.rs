@@ -1086,6 +1086,7 @@ fn reimport_preserves_pending_proposals_approvals_and_unknown_metadata() -> Resu
         improved_description: "Still pending description".into(),
         overlaps_with: vec![],
         confidence: 0.8,
+        category_reason: String::new(),
     };
     value
         .as_table_mut()

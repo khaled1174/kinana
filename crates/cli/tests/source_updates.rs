@@ -178,6 +178,7 @@ fn prepare_approval(f: &Fixture) {
         improved_description: "Pending description never auto accepted".into(),
         overlaps_with: vec![],
         confidence: 0.9,
+        category_reason: String::new(),
     })
     .unwrap();
     meta.as_table_mut()

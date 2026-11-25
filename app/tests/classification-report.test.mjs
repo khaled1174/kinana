@@ -3,11 +3,27 @@ import {test} from 'node:test';
 import {readFileSync,readdirSync,statSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {classificationOutcome,itemReason} from '../src/lib/classification.ts';
+import {classificationOutcome,itemReason,showProviderDetails,STOPS_THAT_ASK} from '../src/lib/classification.ts';
 import {reasonText} from '../src/reasons.ts';
 
 const app=fileURLToPath(new URL('..',import.meta.url));
 const skill=(id,reason_code,classified_by='keywords',proposal_created=false)=>({id,classified_by,proposal_created,reason_code});
+
+test('a stopped run shows the translated cause from its only provider', () => {
+ const failed = {agent: 'claude', status: 'failed', reason_code: 'AGENT_TOOLS_NOT_ISOLATED', planned_calls: 0};
+ const stop = {reason_code: 'AGENT_CLAUDE_UNAVAILABLE', providers: [failed]};
+ const planned = {agent: 'claude', status: 'planned', planned_calls: 1};
+ assert.equal(showProviderDetails(stop.providers, true), true);
+ for (const locale of ['ar', 'en']) {
+  const detail = reasonText(failed.reason_code, locale);
+  assert.notEqual(detail, reasonText(stop.reason_code, locale));
+  assert.notEqual(detail, reasonText('UNKNOWN_REASON', locale));
+ }
+ assert.equal(showProviderDetails([planned], false), false);
+ assert.equal(showProviderDetails([planned], true), false);
+ assert.equal(showProviderDetails([], true), false);
+ assert.equal(showProviderDetails([planned, {agent: 'codex', status: 'unsupported', planned_calls: 0}], false), true);
+});
 
 test('one cause shared by every fallback is shown once, not as a generic failure',()=>{
  const items=Array.from({length:45},(_,i)=>skill(`s${i}`,'AGENT_EXECUTABLE_NOT_FOUND'));
@@ -28,7 +44,7 @@ test('mixed causes are named next to each skill; proposals carry none',()=>{
 });
 
 test('every fallback code the core emits has its own translated reason',()=>{
- const core=readFileSync(path.join(app,'../crates/core/src/agent_runner.rs'),'utf8');
+ const core=['agent_runner.rs','agent_runner/pi.rs','executables.rs'].map(file=>readFileSync(path.join(app,'../crates/core/src',file),'utf8')).join('\n');
  const codes=new Set([...core.matchAll(/"((?:AGENT_[A-Z_]+)|INVALID_AGENT_PROPOSAL)"/g)].map(m=>m[1]));
  codes.delete('AGENT_USAGE_LIMIT');// a stop, reported by the stopped banner, never a per-skill fallback
  assert.ok(codes.has('AGENT_EXECUTABLE_NOT_FOUND')&&codes.has('AGENT_TOOLS_NOT_ISOLATED'),[...codes].join());
@@ -52,4 +68,14 @@ test('the interface never shows development paths such as docs/ or the calibrati
   // bridge.ts only declares the field so the estimate can be sent back unchanged.
   if(!name.endsWith('bridge.ts'))assert.doesNotMatch(text,/source_log/,`${name} reads the calibration source log`);
  }
+});
+
+test('the window offers the choice after exactly the stops the CLI exits 2 for',()=>{
+ const core=readFileSync(path.join(app,'../crates/core/src/classify.rs'),'utf8');
+ const list=core.match(/pub const STOPS_THAT_ASK: \[&str; \d+\] = \[([^\]]*)\]/);
+ assert.ok(list,'STOPS_THAT_ASK not found in classify.rs');
+ assert.deepEqual([...list[1].matchAll(/"([A-Z_]+)"/g)].map(m=>m[1]),STOPS_THAT_ASK);
+ // A named agent at a limit, out of credit or signed out asks too (owner, 2026-11-18).
+ for(const code of ['AGENT_USAGE_LIMIT','AGENT_CREDIT_EXHAUSTED','AGENT_NOT_LOGGED_IN'])assert.ok(STOPS_THAT_ASK.includes(code),code);
+ for(const code of STOPS_THAT_ASK)for(const language of ['ar','en'])assert.notEqual(reasonText(code,language),reasonText('NO_SUCH_CODE',language),code);
 });

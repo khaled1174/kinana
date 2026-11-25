@@ -155,17 +155,25 @@ fn run(args: &Args) -> Result<u8> {
             confirm,
         } => !*rebuild_index && !(*repair && confirm.is_some()),
         Commands::Scan { import_skills, .. } => !*import_skills,
+        Commands::RefreshAudit { confirm } => confirm.is_none(),
         Commands::Review {
+            ids,
             accept,
             reject,
             original,
-            ..
-        } => !accept && !reject && !original,
+            confirm,
+        } => (!accept && !reject && !original) || (*accept && confirm.is_none() && ids.len() > 1),
         Commands::Bundle { command } => {
             matches!(command, BundleCommands::List | BundleCommands::Show { .. })
         }
         _ => false,
     };
+    // Refused before anything touches the state or the index (0.3).
+    if let Commands::Classify { agent, .. } = &args.command
+        && agent == "codex"
+    {
+        return Err(kinana_core::agent_runner::codex_unsupported());
+    }
     if !read_only && !args.dry_run {
         kinana_core::state::require_writable(&vault.index_path)?;
     }
@@ -615,8 +623,12 @@ fn run(args: &Args) -> Result<u8> {
             all,
             pending,
             agent,
+            model,
+            effort,
+            claude_events,
             yes,
             full,
+            confirm,
         } => {
             let report = kinana_core::classify::classify(
                 &vault,
@@ -628,6 +640,10 @@ fn run(args: &Args) -> Result<u8> {
                     confirmed: *yes,
                     dry_run: args.dry_run,
                     full: *full,
+                    claude_model: model.clone(),
+                    claude_effort: effort.clone(),
+                    claude_events: *claude_events,
+                    pi_confirmation: confirm.clone(),
                 },
             )?;
             let mut text = format!(
@@ -641,14 +657,22 @@ fn run(args: &Args) -> Result<u8> {
                 report.estimated_tokens.total_input_tokens,
                 report.estimated_tokens.retry_limit_input_tokens
             );
+            if let Some(pi) = &report.pi_confirmation {
+                text.push_str(&format!(
+                    "\nPi (experimental) may classify {} skills if Claude does not: provider {}, model {}{}, up to {} calls. To allow it, repeat for exactly these skills with --confirm {}",
+                    pi.skills,
+                    pi.provider,
+                    pi.model,
+                    if pi.model_default {
+                        " (Pi's default for this provider)"
+                    } else {
+                        ""
+                    },
+                    pi.max_calls,
+                    pi.token
+                ));
+            }
             for item in &report.items {
-                if !report.dry_run && *agent == "claude" && item.classified_by == "keywords" {
-                    output::warning(&format!(
-                        "{}: requested Claude classification did not succeed; using keyword fallback; no model proposal was accepted. {}",
-                        item.id,
-                        item.warnings.join(" ")
-                    ))?;
-                }
                 text.push_str(&format!(
                     "\n{}\t{}\t{}",
                     item.id, item.category, item.classified_by
@@ -669,14 +693,83 @@ fn run(args: &Args) -> Result<u8> {
                     stopped.remaining.len()
                 ))?;
             }
+            for item in &report.skipped {
+                text.push_str(&format!(
+                    "\nSkipped {} ({}: {}, {} attempts)",
+                    item.id, item.agent, item.reason_code, item.attempts
+                ));
+            }
+            // Contract 11 (owner, 2026-11-24): `auto_approved` in --json.
+            if let Some(approved) = &report.auto_approved {
+                let one = approved.ids.len() == 1;
+                text.push_str(&format!(
+                    "\nApproved automatically: the proposed description{} of {} skill{} that {} not risky, in commit {}: {}. `kinana undo` reverts this approval only.",
+                    if one { "" } else { "s" },
+                    approved.ids.len(),
+                    if one { "" } else { "s" },
+                    if one { "is" } else { "are" },
+                    approved.commit,
+                    approved.ids.join(", ")
+                ));
+            }
             output::emit(&report, args.json, &text)?;
+            if report.stopped.as_ref().is_some_and(|s| {
+                kinana_core::classify::STOPS_THAT_ASK.contains(&s.reason_code.as_str())
+            }) || (report.stopped.is_none() && !report.skipped.is_empty())
+            {
+                return Ok(2);
+            }
         }
         Commands::Review {
-            id,
+            ids,
+            accept,
+            confirm,
+            ..
+        } if ids.len() > 1 || confirm.is_some() => {
+            if !accept {
+                return Err(Error::new(
+                    "INVALID_ARGUMENTS",
+                    "Several skills can only be reviewed together with --accept",
+                ));
+            }
+            let report =
+                kinana_core::review::accept_many(&vault, ids, confirm.as_deref(), args.dry_run)?;
+            let mut text = String::new();
+            for item in &report.items {
+                text.push_str(&format!(
+                    "{}\nCurrent:\n{}\nProposed:\n{}\n\n",
+                    item.id, item.current, item.proposed
+                ));
+            }
+            if report.committed {
+                text.push_str(&format!(
+                    "Accepted {} descriptions in one change; `kinana undo` reverts them together.",
+                    report.items.len()
+                ));
+            } else if report.requires_confirmation {
+                text.push_str(&format!(
+                    "Review the {} descriptions above, then repeat with --confirm {}",
+                    report.items.len(),
+                    report.preview_token
+                ));
+            } else {
+                text.push_str("Preview only; nothing was written.");
+            }
+            output::emit(&report, args.json, &text)?;
+            return Ok(if report.requires_confirmation && !args.dry_run {
+                2
+            } else {
+                0
+            });
+        }
+        Commands::Review {
+            ids,
             accept,
             reject,
             original,
+            ..
         } => {
+            let id = &ids[0];
             let decision = if *accept {
                 kinana_core::ReviewDecision::Accept
             } else if *reject {
@@ -790,6 +883,15 @@ fn run(args: &Args) -> Result<u8> {
                 ));
             }
             output::emit(&report, args.json, &text)?;
+            return Ok(if report.requires_confirmation && !args.dry_run {
+                2
+            } else {
+                0
+            });
+        }
+        Commands::RefreshAudit { confirm } => {
+            let report = refresh_audit(&vault, &home, confirm.as_deref(), args.dry_run)?;
+            output::emit(&report, args.json, &refresh_audit_text(&report))?;
             return Ok(if report.requires_confirmation && !args.dry_run {
                 2
             } else {
@@ -1199,6 +1301,83 @@ fn bundle_text(report: &kinana_core::BundleSaveReport) -> String {
     );
     for warning in &report.warnings {
         text.push_str(&format!("\nWarning: {warning}"));
+    }
+    text
+}
+
+/// `refresh-audit`: the stored audits next to the current rules (rules version 3).
+#[derive(serde::Serialize)]
+struct RefreshAuditReport {
+    #[serde(flatten)]
+    upgrade: kinana_core::audit::RulesUpgrade,
+    changed: bool,
+    preview_token: String,
+    requires_confirmation: bool,
+    dry_run: bool,
+    committed: bool,
+}
+
+fn refresh_audit(
+    vault: &Vault,
+    home: &std::path::Path,
+    confirm: Option<&str>,
+    dry_run: bool,
+) -> Result<RefreshAuditReport> {
+    use kinana_core::settings::{self, Action};
+    let plan = settings::preview(vault, home, &Action::RefreshAudit)?;
+    let upgrade = plan.audit.clone().unwrap_or_default();
+    let mut report = RefreshAuditReport {
+        upgrade,
+        changed: plan.changed,
+        preview_token: plan.token.clone(),
+        requires_confirmation: plan.changed,
+        dry_run,
+        committed: false,
+    };
+    let Some(token) = confirm else {
+        return Ok(report);
+    };
+    if token != plan.token {
+        return Err(Error::new(
+            "SETTINGS_PREVIEW_CHANGED",
+            "The vault changed since the preview; preview the re-audit again",
+        ));
+    }
+    report.requires_confirmation = false;
+    if !dry_run {
+        report.committed =
+            settings::apply_controlled(vault, home, &Action::RefreshAudit, token, None)?.committed;
+    }
+    Ok(report)
+}
+
+fn refresh_audit_text(report: &RefreshAuditReport) -> String {
+    let upgrade = &report.upgrade;
+    let mut text = format!(
+        "Audit rules version {}: {} skill(s) audited with older rules. Raised: {}  Lowered: {}  Unchanged: {}",
+        upgrade.rules_version,
+        upgrade.older,
+        upgrade.raised.len(),
+        upgrade.lowered.len(),
+        upgrade.unchanged
+    );
+    for (label, changes) in [("Raised", &upgrade.raised), ("Lowered", &upgrade.lowered)] {
+        for change in changes {
+            text.push_str(&format!(
+                "\n{label}: {} {} -> {}",
+                change.id, change.from, change.to
+            ));
+        }
+    }
+    if report.committed {
+        text.push_str("\nRe-audited every skill in one commit; `kinana undo` reverts it.");
+    } else if report.requires_confirmation {
+        text.push_str(&format!(
+            "\nNothing changed. To re-audit every skill, repeat with --confirm {}",
+            report.preview_token
+        ));
+    } else if !report.changed {
+        text.push_str("\nStored audits already match the current rules.");
     }
     text
 }

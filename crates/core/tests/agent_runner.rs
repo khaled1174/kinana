@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-const HELP: &str = include_str!("../../../docs/evidence/phase-3/claude-help.txt");
+const HELP: &str = include_str!("../../../tests/fixtures/classification/claude-help.txt");
 /// Claude Code 2.1.326 reworded most option descriptions, including `--tools`.
 const HELP_2_1_326: &str = include_str!("fixtures/claude-help/2.1.326.txt");
 
@@ -21,6 +21,7 @@ fn proposal() -> ClassificationProposal {
         improved_description: "Review a user interface before implementation".into(),
         overlaps_with: vec!["existing-review".into()],
         confidence: 0.82,
+        category_reason: "Fits the primary purpose.".into(),
     }
 }
 
@@ -534,7 +535,7 @@ fn isolated_runner_entrypoint() {
         description: "private-unrelated-fixture".into(),
         ..peer.clone()
     };
-    let outcome = classify(
+    let result = classify(
         &vault,
         "ui-review",
         &raw,
@@ -542,11 +543,26 @@ fn isolated_runner_entrypoint() {
         lists().allowed(),
         &[target, peer, other],
         requested,
-    )
-    .unwrap();
+    );
+    // 0.3: Codex is refused before any executable is looked up or run.
+    if mode == "codex" {
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "AGENT_CODEX_UNSUPPORTED");
+        assert!(error.needs_decision);
+        assert!(
+            !root.join("trace.jsonl").exists()
+                || fs::read_to_string(root.join("trace.jsonl"))
+                    .unwrap()
+                    .is_empty(),
+            "an unselected executable was run"
+        );
+        return;
+    }
+    let outcome = result.unwrap();
     let success = matches!(
         mode.as_str(),
         "success"
+            | "auto"
             | "stream_success"
             | "help_2_1_326"
             | "envelope"
@@ -574,8 +590,6 @@ fn isolated_runner_entrypoint() {
         | "source_path"
         | "source_symlink"
         | "source_metadata_path"
-        | "auto"
-        | "codex"
         | "keywords"
         | "launchd_path" => 0,
         _ => 1,
@@ -590,15 +604,17 @@ fn isolated_runner_entrypoint() {
     let expected_reason = match mode.as_str() {
         _ if success => None,
         "keywords" => None,
-        "relative_path"
-        | "vault_path"
+        "launchd_path" => Some("AGENT_EXECUTABLE_NOT_FOUND"),
+        // A claude that exists but fails a trust rule is present, not absent
+        // (review of 8d7a5a4, M1): `auto` must not use keywords for it. One
+        // behind a relative PATH entry too (owner decision, 2026-11-18).
+        "vault_path"
         | "source_path"
         | "source_symlink"
         | "source_metadata_path"
-        | "launchd_path" => Some("AGENT_EXECUTABLE_NOT_FOUND"),
+        | "relative_path" => Some("AGENT_EXECUTABLE_UNTRUSTED"),
         "missing_capability" => Some("AGENT_CAPABILITY_UNPROVEN"),
         "probe_artifact" => Some("AGENT_WORKDIR_UNAVAILABLE"),
-        "auto" | "codex" => Some("AGENT_CODEX_UNSUPPORTED"),
         "extra_tool" | "no_init" => Some("AGENT_TOOLS_NOT_ISOLATED"),
         "invalid" | "invalid_stack" | "invalid_stage" => Some("INVALID_AGENT_PROPOSAL"),
         "oversize_stdout" | "oversize_stderr" => Some("AGENT_OUTPUT_LIMIT"),
@@ -785,8 +801,10 @@ fn isolated_runner_entrypoint() {
             serde_json::json!({"type": "array", "items": {"type": "string", "enum": stages()}})
         );
         let required = schema["required"].as_array().unwrap();
-        assert_eq!(required.len(), 10);
+        assert_eq!(required.len(), 11);
         assert!(required.contains(&"stack".into()) && required.contains(&"stage".into()));
+        assert!(required.contains(&"category_reason".into()));
+        assert_eq!(schema["properties"]["category_reason"]["maxLength"], 160);
         let cwd = Path::new(event["cwd"].as_str().unwrap());
         assert!(cwd.starts_with(root.join("cache/tmp")));
         assert!(!cwd.exists(), "owned temporary cwd was not cleaned");
@@ -803,7 +821,7 @@ fn isolated_runner_entrypoint() {
         for sentence in [
             "Choose stack as zero or more literal values from allowed_stacks: the technologies the skill is specifically written for",
             "Choose stage as zero or more literal values from allowed_stages: the phases of work in which the skill is used",
-            "Return only the ten JSON fields",
+            "Return only the eleven JSON fields",
         ] {
             assert!(trusted.contains(sentence), "missing: {sentence}");
         }
@@ -843,9 +861,7 @@ fn isolated_runner_entrypoint() {
     }
     if matches!(
         mode.as_str(),
-        "auto"
-            | "codex"
-            | "relative_path"
+        "relative_path"
             | "vault_path"
             | "source_path"
             | "source_symlink"
@@ -871,6 +887,7 @@ fn flow_proposal() -> ClassificationProposal {
         improved_description: "Review interface components before merging.".into(),
         overlaps_with: vec![],
         confidence: 0.9,
+        category_reason: "Fits the primary purpose.".into(),
     }
 }
 
@@ -930,6 +947,28 @@ fn isolated_dimension_flow_entrypoint() {
     let mode = std::env::var("KINANA_AGENT_TEST_MODE").unwrap();
     let vault = Vault::new(root.join("vault"), root.join("cache/index.db"));
     vault.init(false).unwrap();
+    // This flow reviews the proposal by hand: the automatic approval of
+    // descriptions (owner, 2026-11-24, r5/r6) is turned off for it.
+    let config = vault.root.join("box.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    fs::write(&config, format!("auto_approve_descriptions = false\n{text}")).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&vault.root)
+            .args([
+                "-c",
+                "user.name=Kinana Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qam",
+                "Review descriptions by hand",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
     let skill = root.join("collection/ui-review");
     fs::create_dir_all(&skill).unwrap();
     fs::write(
@@ -957,7 +996,6 @@ fn isolated_dimension_flow_entrypoint() {
         },
     )
     .unwrap();
-    let item = &report.items[0];
     let stored = edit::read_metadata(&vault, "ui-review").unwrap();
     let prompts = fs::read_to_string(root.join("trace.jsonl"))
         .unwrap()
@@ -965,6 +1003,7 @@ fn isolated_dimension_flow_entrypoint() {
         .filter(|line| line.contains("\"prompt\""))
         .count();
     if mode == "stream_success" {
+        let item = &report.items[0];
         assert_eq!(item.classified_by, "claude", "{:?}", item.warnings);
         assert!(item.proposal_created);
         assert_eq!((report.agent_calls, prompts), (1, 1));
@@ -974,6 +1013,18 @@ fn isolated_dimension_flow_entrypoint() {
         assert_eq!(stored.classification.stage, ["review"]);
         assert_eq!(stored.proposal, Some(flow_proposal()));
         assert_eq!(stored.description.active, "original");
+        // 0.3: the product sends template 1 until the evaluation gate passes
+        // (owner decision, 2026-11-18), and the reason is kept with the
+        // classification it explains.
+        let context = stored.classification_context.clone().unwrap();
+        assert_eq!(
+            context.prompt_version,
+            kinana_core::agent_runner::PROMPT_VERSION_NAMES_ONLY
+        );
+        assert_eq!(context.category_reason, "Fits the primary purpose.");
+        let sent = fs::read_to_string(root.join("trace.jsonl")).unwrap();
+        assert!(!sent.contains("<taxonomy-guide>"));
+        assert!(sent.contains("category_reason"));
         let accepted =
             kinana_core::review::review(&vault, "ui-review", ReviewDecision::Accept, false)
                 .unwrap();
@@ -987,16 +1038,18 @@ fn isolated_dimension_flow_entrypoint() {
         assert_eq!(record.stack, ["react", "next"]);
         assert_eq!(record.stage, ["review"]);
     } else {
-        // One retry, then keywords: no valid part of the rejected answer is kept.
-        assert_eq!(item.classified_by, "keywords");
-        assert!(!item.proposal_created);
+        // One retry, then leave the skill untouched and report the reason.
+        assert!(report.items.is_empty());
         assert_eq!((report.agent_calls, prompts), (2, 2));
-        assert!(
-            item.warnings
-                .iter()
-                .any(|warning| warning.contains("INVALID_AGENT_PROPOSAL"))
-        );
-        assert_eq!(stored.classification.classified_by, "keywords");
+        assert!(report.stopped.is_none());
+        assert_eq!(report.skipped.len(), 1);
+        let skipped = &report.skipped[0];
+        assert_eq!(skipped.id, "ui-review");
+        assert_eq!(skipped.agent, "claude");
+        assert_eq!(skipped.reason_code, "INVALID_AGENT_PROPOSAL");
+        assert_eq!(skipped.attempts, 2);
+        assert!(!report.committed);
+        assert_ne!(stored.classification.classified_by, "keywords");
         assert!(stored.classification.stack.is_empty());
         assert!(stored.classification.stage.is_empty());
         assert!(stored.proposal.is_none());
@@ -1159,7 +1212,7 @@ fn finder_environment_child() {
         assert_eq!(outcome.attempts, 0);
         assert_eq!(
             outcome.reason_code.as_deref(),
-            Some("AGENT_EXECUTABLE_NOT_FOUND")
+            Some("AGENT_EXECUTABLE_UNTRUSTED")
         );
         let expected = match scenario.as_str() {
             "inside_source" => "inside the vault or a skill source",

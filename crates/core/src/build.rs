@@ -879,6 +879,15 @@ fn write_payload(target: &Path, entries: &[PayloadEntry]) -> Result<()> {
 }
 
 /// Canonicalize only YAML. Delimiters, BOM, and all bytes of the body survive.
+/// Whether `description` goes into the frontmatter of `text` and reads back
+/// unchanged: the step a build applies to an approved description, checked
+/// before an automatic approval is committed (0.3, r5).
+pub(crate) fn description_fits(text: &str, description: &str) -> bool {
+    replace_description(text, description)
+        .and_then(|replaced| frontmatter::parse_skill(&replaced))
+        .is_ok_and(|manifest| manifest.description == description)
+}
+
 fn replace_description(text: &str, description: &str) -> Result<String> {
     replace_frontmatter(text, "description", Yaml::String(description.into()))
 }

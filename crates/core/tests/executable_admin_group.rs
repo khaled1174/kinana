@@ -48,6 +48,7 @@ fn skip(reason: &str) {
 fn plan(bin: &Path, admin_member: bool) -> SearchPlan {
     SearchPlan {
         path: vec![],
+        relative_path: vec![],
         known: vec![bin.into()],
         admin_member: AdminMembership::known(admin_member),
         ..SearchPlan::current()
@@ -212,6 +213,7 @@ fn membership_is_asked_only_when_needed_and_once() {
     let staff = bin(&temp, gid, 0o755).unwrap();
     let lazy = SearchPlan {
         path: vec![],
+        relative_path: vec![],
         known: vec![staff.clone()],
         admin_member: AdminMembership::ask(),
         ..SearchPlan::current()
@@ -256,6 +258,7 @@ fn a_trusted_real_git_wins_over_the_tools_stub() {
     let is_stub = |git: &Path| git.starts_with(&stub_bin);
     let plan = |known: Vec<PathBuf>| SearchPlan {
         path: vec![stub_bin.clone()],
+        relative_path: vec![],
         known,
         admin_member: AdminMembership::known(true),
         ..SearchPlan::current()

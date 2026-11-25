@@ -139,6 +139,7 @@ fn the_beta_and_this_version_both_work_on_one_vault() {
         improved_description: "Build accessible React forms with validation.".into(),
         overlaps_with: vec![],
         confidence: 0.9,
+        category_reason: String::new(),
     });
     edit::apply(
         &vault,

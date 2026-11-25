@@ -6,6 +6,3 @@ docs/evidence/phase-6/pre-3-core/*.txt -whitespace
 docs/evidence/phase-6/batch-3/*.txt -whitespace
 docs/evidence/phase-7/dmg/**/*.txt -whitespace
 docs/evidence/phase-7/dmg/*.txt -whitespace
-
-# Preserve whitespace and line endings in verbatim upstream notices.
-THIRD_PARTY_NOTICES -whitespace -text

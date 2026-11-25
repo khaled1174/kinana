@@ -12,7 +12,9 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import re
+import shlex
 import shutil
 import subprocess
 
@@ -41,6 +43,21 @@ MINIMUM_MACOS = '27.0'
 if not (json.loads((ROOT / 'app/src-tauri/tauri.beta.conf.json').read_text())['bundle']['macOS']['minimumSystemVersion'] == MINIMUM_MACOS):
     raise SystemExit('Beta configuration must specify macOS 27.0')
 env.update(CARGO_TARGET_DIR=str(target), MACOSX_DEPLOYMENT_TARGET=MINIMUM_MACOS)
+account = pwd.getpwuid(os.getuid())
+home = Path(account.pw_dir).resolve()
+cargo_home = Path(env.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
+prefixes = {home: "/home/build", Path.home().resolve(): "/home/build",
+            cargo_home: "/cargo", ROOT: "/src/kinana", target: "/build/kinana"}
+# rustc uses the last matching prefix. Apply more specific mappings last.
+prefixes = sorted(prefixes.items(), key=lambda item: len(item[0].parts))
+rustflags = env.get("CARGO_ENCODED_RUSTFLAGS", "").split("\x1f")
+if not rustflags[0]:
+    rustflags = shlex.split(env.get("RUSTFLAGS", ""))
+rustflags.extend(f"--remap-path-prefix={path}={replacement}" for path, replacement in prefixes)
+env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rustflags)
+cflags = shlex.split(env.get("CFLAGS", ""))
+cflags.extend(f"-ffile-prefix-map={path}={replacement}" for path, replacement in prefixes)
+env["CFLAGS"] = shlex.join(cflags)
 commands = []
 
 def run(name, argv):
@@ -104,6 +121,19 @@ for binary in [executable, bundled_cli]:
         raise SystemExit(build_version)
 if not ((app / 'Contents/Resources/LICENSE').read_bytes() == (ROOT / 'LICENSE').read_bytes()):
     raise SystemExit("Release verification failed: (app / 'Contents/Resources/LICENSE').read_bytes() == (ROOT / 'LICENSE').read_bytes()")
+if not ((app / 'Contents/Resources/THIRD_PARTY_NOTICES.md').read_bytes() == (ROOT / 'THIRD_PARTY_NOTICES.md').read_bytes()):
+    raise SystemExit("Release verification failed: (app / 'Contents/Resources/THIRD_PARTY_NOTICES.md').read_bytes() == (ROOT / 'THIRD_PARTY_NOTICES.md').read_bytes()")
+# Gate signing on the release executable strings.
+privacy = {}
+for binary in (executable, bundled_cli):
+    printable = subprocess.check_output(["/usr/bin/strings", "-a", binary]).lower()
+    privacy[binary.name] = {
+        "home_matches": printable.count(os.fsencode(home).lower()),
+        "username_matches": printable.count(os.fsencode(account.pw_name).lower()),
+    }
+(evidence / "binary-privacy.json").write_text(json.dumps(privacy, indent=2) + "\n")
+if any(count for matches in privacy.values() for count in matches.values()):
+    raise SystemExit("Personal path or username in release binary strings; see binary-privacy.json")
 # Inside out: the CLI, then the app that seals it.
 run('sign-cli', ['/usr/bin/codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.identity, bundled_cli])
 details = run('signature-cli', ['/usr/bin/codesign', '-dvvv', bundled_cli])

@@ -108,6 +108,7 @@ fn proposal(stack: &[&str], stage: &[&str]) -> ClassificationProposal {
         improved_description: "Review interface components before merging.".into(),
         overlaps_with: vec![],
         confidence: 0.9,
+        category_reason: String::new(),
     }
 }
 
@@ -507,6 +508,10 @@ fn save(vault: &Vault, stacks: Option<&[&str]>, stages: Option<&[&str]>) -> Resu
         stages: stages.map(strings),
         scan_paths: config.scan_paths,
         record_found_in: config.record_found_in,
+        definitions: None,
+        pi: None,
+        claude: None,
+        auto_approve_descriptions: None,
     })
 }
 

@@ -72,6 +72,13 @@ pub struct Lookup {
     pub path: Vec<PathBuf>,
     /// The fixed install locations searched after `PATH`, with their outcome.
     pub known: Vec<Checked>,
+    /// An executable with this name exists in a `PATH` entry but is inside
+    /// the vault or a skill source (0.3). Fixed locations say it in `known`.
+    pub path_refused: bool,
+    /// Only a relative `PATH` entry (`bin`, `.`, or an empty entry) holds an
+    /// executable with this name. It is never used and never counts as
+    /// absent: untrusted (owner decision, 2026-11-18).
+    pub relative_refused: bool,
 }
 
 impl Lookup {
@@ -96,10 +103,39 @@ impl Lookup {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        if known.is_empty() {
+        let searched = if known.is_empty() {
             format!("Searched PATH ({path})")
         } else {
             format!("Searched PATH ({path}) and then {known}")
+        };
+        if self.relative_refused {
+            format!(
+                "{searched}; a relative PATH entry holds one, and relative entries are never trusted"
+            )
+        } else {
+            searched
+        }
+    }
+
+    /// True when nothing was refused: the program is simply not on this
+    /// computer. A program that exists but failed a trust rule is present
+    /// (owner rule 2026-11-18: `auto` then stops instead of using keywords).
+    pub fn absent(&self) -> bool {
+        self.found.is_none()
+            && !self.path_refused
+            && !self.relative_refused
+            && self
+                .known
+                .iter()
+                .all(|checked| checked.outcome == Outcome::Absent)
+    }
+
+    /// The refusal code when nothing usable was found.
+    pub fn missing_code(&self) -> &'static str {
+        if self.absent() {
+            "AGENT_EXECUTABLE_NOT_FOUND"
+        } else {
+            "AGENT_EXECUTABLE_UNTRUSTED"
         }
     }
 
@@ -123,6 +159,10 @@ impl Lookup {
 #[derive(Debug, Clone)]
 pub struct SearchPlan {
     pub path: Vec<PathBuf>,
+    /// The relative entries of `PATH`, resolved against the current
+    /// directory only to report a program found there; never searched for
+    /// use (see [`Lookup::relative_refused`]).
+    pub relative_path: Vec<PathBuf>,
     pub known: Vec<PathBuf>,
     pub uid: u32,
     /// Whether the user belongs to `admin` (gid 80); see [`ADMIN_GID`].
@@ -192,6 +232,7 @@ impl SearchPlan {
         }
         Self {
             path: path_directories(),
+            relative_path: relative_path_directories(),
             known: unique,
             uid: current_uid(),
             admin_member: AdminMembership::ask(),
@@ -206,6 +247,25 @@ pub fn path_directories() -> Vec<PathBuf> {
         .map(|paths| {
             std::env::split_paths(&paths)
                 .filter(|path| path.is_absolute())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The relative entries of this process's `PATH`; an empty entry is the
+/// current directory, as for a shell.
+pub fn relative_path_directories() -> Vec<PathBuf> {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .filter(|path| !path.is_absolute())
+                .map(|path| {
+                    if path.as_os_str().is_empty() {
+                        PathBuf::from(".")
+                    } else {
+                        path
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -312,11 +372,15 @@ pub fn find_in(plan: &SearchPlan, name: &str, excluded: &[PathBuf]) -> Lookup {
         ..Default::default()
     };
     for directory in &plan.path {
-        if let Some(found) = path_candidate(&directory.join(&file_name), &excluded) {
+        let candidate = directory.join(&file_name);
+        if let Some(found) = path_candidate(&candidate, &excluded) {
             lookup.found = Some(found);
             lookup.found_in = Some(directory.clone());
             return lookup;
         }
+        lookup.path_refused |= candidate
+            .canonicalize()
+            .is_ok_and(|canonical| executable_file(&canonical));
     }
     for directory in &plan.known {
         if plan.path.contains(directory) {
@@ -334,6 +398,18 @@ pub fn find_in(plan: &SearchPlan, name: &str, excluded: &[PathBuf]) -> Lookup {
             lookup.found_in = Some(directory.clone());
             return lookup;
         }
+    }
+    // Nothing trusted was found: a program behind a relative entry makes
+    // the result "untrusted", not "absent", so `auto` stops instead of
+    // using keywords. It is never run.
+    if let Ok(current) = std::env::current_dir() {
+        lookup.relative_refused = plan.relative_path.iter().any(|directory| {
+            current
+                .join(directory)
+                .join(&file_name)
+                .canonicalize()
+                .is_ok_and(|canonical| executable_file(&canonical))
+        });
     }
     lookup
 }
@@ -699,7 +775,7 @@ pub fn agent_path(
                 None => Err(Refusal {
                     code: "AGENT_INTERPRETER_UNTRUSTED",
                     message: format!(
-                        "The Claude script names the interpreter {}, which does not pass the trust rule ({}). Claude was not started. Using keywords.",
+                        "The agent script names the interpreter {}, which does not pass the trust rule ({}). The agent was not started.",
                         interpreter.display(),
                         lookup.locations().join(", ")
                     ),
@@ -722,7 +798,7 @@ pub fn agent_path(
                         "AGENT_NODE_NOT_FOUND"
                     },
                     message: format!(
-                        "Claude is a Node.js script, and no node passing the trust rule was found. Searched {}. Claude was not started. Using keywords.",
+                        "The agent is a Node.js script, and no node passing the trust rule was found. Searched {}. The agent was not started.",
                         lookup.locations().join(", ")
                     ),
                     locations: lookup.locations(),
@@ -730,8 +806,9 @@ pub fn agent_path(
             };
             let private = private_bin(&node).map_err(|_| Refusal {
                 code: "AGENT_WORKDIR_UNAVAILABLE",
-                message: "A private directory for node could not be created; using keywords."
-                    .into(),
+                message:
+                    "A private directory for node could not be created; the agent was not started."
+                        .into(),
                 locations: vec![],
             })?;
             let mut entries = vec![private.0.clone()];
@@ -745,7 +822,7 @@ pub fn agent_path(
         Launcher::Refused(line) => Err(Refusal {
             code: "AGENT_INTERPRETER_UNTRUSTED",
             message: format!(
-                "The Claude script starts with `#!{line}`, which could run a program that was not checked. Claude was not started. Using keywords."
+                "The agent script starts with `#!{line}`, which could run a program that was not checked. The agent was not started."
             ),
             locations: vec![],
         }),

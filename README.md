@@ -2,7 +2,7 @@
 
 كنانة مخزن شخصي لمهارات الوكلاء على macOS. يجمع ملفات `SKILL.md` في مخزن محلي، ويساعدك على فحصها والبحث فيها وتجميعها وتفعيل ما تختاره لكل مشروع. توفر الواجهة العربية والإنجليزية إمكانات المحرك نفسه الذي تستخدمه أداة `kinana` المضمّنة في التطبيق.
 
-## بيتا 0.2.0 على macOS
+## بيتا 0.3.0 على macOS
 
 - الحزمة لأجهزة Apple Silicon (`arm64`).
 - macOS **27.0** أو أحدث هو الحد الأدنى في الحزمة. جرى التحقق من الحزمة على **macOS 27.2.1**. إجراءات التحقق من التنزيل موجودة في [دليل التثبيت](docs/installation.md).
@@ -10,7 +10,7 @@
 
 ### التثبيت وأول تشغيل
 
-1. نزّل `Kinana-0.2.0-beta-arm64.dmg` من صفحة الإصدار وقارن SHA-256 بالقيمة المنشورة. افتح الصورة واسحب `Kinana.app` إلى **Applications**، ثم أخرج الصورة.
+1. نزّل `Kinana-0.3.0-beta-arm64.dmg` من صفحة الإصدار وقارن SHA-256 بالقيمة المنشورة. افتح الصورة واسحب `Kinana.app` إلى **Applications**، ثم أخرج الصورة.
 2. افتح **Kinana** من **Applications** في Finder. الحزمة موقّعة بـDeveloper ID وموثّقة من Apple. قد يسألك macOS عما إذا كنت تريد فتح تطبيق نُزّل من الإنترنت. إذا ظهر تحذير تلف التطبيق أو تعذّر التحقق من المطوّر، تحقّق من التجزئة وأعد تنزيل الحزمة من صفحة الإصدار. أبقِ Gatekeeper مفعّلًا.
 3. اختر مخزنًا موجودًا أو أنشئ مخزنًا جديدًا في `~/KinanaVault` أو مسار تختاره. راجع مجلدات المهارات التي يكتشفها المعالج، واختر ما تريد استيراده بعد المعاينة. يمكنك تخطّي الوكلاء والموجّه وإكمال الإعداد لاحقًا.
 
@@ -31,7 +31,7 @@
 3. **التطبيق والبيانات المحلية.** أغلق Kinana وانقل `/Applications/Kinana.app` إلى سلة المهملات. أزل `~/.kinana/` إن لم تعد بحاجة إلى الإعدادات والفهرس وسجل المشاريع والملفات المؤقتة، وأزل `~/.kinana-write.lock` بعد إغلاق أي عملية للـCLI. إن أجريت ترحيلًا، راجع `~/.skillsbox/` و`~/.kinana-migrations/` و`~/.kinana-migration-head` و`~/.kinana-migrating.json` وملفات استعادة الترحيل قبل حذفها، واحتفظ بما تحتاجه للرجوع. [دليل الترحيل](docs/migration.md)
 4. **المخزن وملفات macOS.** المخزن وتاريخه بياناتك. احتفظ بنسخة ثم احذف `~/KinanaVault` أو المسار الذي اخترته إذا أردت إزالته أيضًا. امسح عند وجودها عناصر التطبيق ذات المعرّف `io.github.khaled1174.kinana` من `~/Library/Application Support/` و`~/Library/Caches/` و`~/Library/WebKit/` و`~/Library/HTTPStorages/` و`~/Library/Preferences/` (`.plist`) و`~/Library/Saved Application State/` (`.savedState`) و`~/Library/Logs/`، وأزل الـDMG الذي نزّلته. احتفظ بإعدادات الوكلاء ومصادر المهارات الأصلية.
 
-[ملاحظات إصدار 0.2.0-beta بالعربية والإنجليزية](RELEASE_NOTES_0.2.0-beta.md) · [رخصة MIT](LICENSE)
+[ملاحظات إصدار 0.3.0-beta بالعربية والإنجليزية](RELEASE_NOTES_0.3.0-beta.md) · [رخصة MIT](LICENSE)
 
 ## البناء والاختبارات
 
@@ -53,4 +53,4 @@ npm --prefix app run test:unit
 python3 scripts/test_beta_checks.py
 ~~~
 
-[دليل التثبيت](docs/installation.md) · [المواصفات](docs/SPEC.md) · [عقد CLI/JSON](docs/cli-json.md) · [إشعارات الاعتماديات](THIRD_PARTY_NOTICES)
+[دليل التثبيت](docs/installation.md) · [المواصفات](docs/SPEC.md) · [عقد CLI/JSON](docs/cli-json.md) · [إشعارات الاعتماديات](THIRD_PARTY_NOTICES.md)

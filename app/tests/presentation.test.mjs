@@ -14,7 +14,7 @@ test('word diff preserves complete original/proposed strings and marks only chan
   assert.equal(d.original.filter(p=>p.changed).map(p=>p.text).join(''),removed);assert.equal(d.proposed.filter(p=>p.changed).map(p=>p.text).join(''),added);
  }
 });
-test('real Claude proposal remains unabridged, including its final sentence',async()=>{
- const {readFileSync}=await import('node:fs');const fixture=JSON.parse(readFileSync(new URL('../../docs/evidence/phase-6/batch-2/live-proposal.json',import.meta.url)));
+test('synthetic Claude proposal remains unabridged, including its final sentence',async()=>{
+ const {readFileSync}=await import('node:fs');const fixture=JSON.parse(readFileSync(new URL('../../tests/fixtures/public-release/presentation-proposal.json',import.meta.url)));
  const d=descriptionDiff(fixture.original,fixture.proposal.improved_description);assert.equal(d.original.map(p=>p.text).join(''),fixture.original);assert.equal(d.proposed.map(p=>p.text).join(''),fixture.proposal.improved_description);assert.ok(d.original.some(p=>p.changed));assert.ok(d.proposed.some(p=>p.changed));
 });

@@ -82,6 +82,14 @@ pub struct Bootstrap {
     /// The router names a CLI path that is no longer this app's: the app
     /// moved. The window offers the router preview; nothing is written here.
     router_moved: Option<RouterMoved>,
+    /// Stored audits made by older rules, while the user has not answered the
+    /// re-audit prompt on this computer (0.3). Computed by reading only.
+    audit_rules: Option<AuditRules>,
+}
+#[derive(Serialize)]
+pub struct AuditRules {
+    older: usize,
+    rules_version: u32,
 }
 #[derive(Serialize)]
 pub struct RouterMoved {
@@ -94,6 +102,13 @@ fn inspect(home: &Path) -> Bootstrap {
         .as_ref()
         .cloned()
         .unwrap_or_else(|_| core::settings::default_vault(home));
+    let audit_rules = core::settings::audit_rules_prompt(home, &root)
+        .ok()
+        .flatten()
+        .map(|older| AuditRules {
+            older,
+            rules_version: core::audit::RULES_VERSION,
+        });
     Bootstrap {
         #[cfg(feature = "e2e")]
         test_pid: std::process::id(),
@@ -104,7 +119,15 @@ fn inspect(home: &Path) -> Bootstrap {
         version: env!("CARGO_PKG_VERSION"),
         agents: core::agents::detect(home),
         router_moved: core::router::relocation(home).map(|(from, to)| RouterMoved { from, to }),
+        audit_rules,
     }
+}
+/// The user answered the start prompt (opened the preview or chose "not
+/// now"). Only this click writes; stored audits are not touched.
+#[tauri::command]
+pub async fn answer_audit_rules_prompt() -> Result<(), Error> {
+    let home = home()?;
+    work(move || core::settings::record_audit_rules_prompt(&home)).await
 }
 #[tauri::command]
 pub fn bootstrap() -> Result<Bootstrap, Error> {
@@ -193,25 +216,108 @@ pub async fn review_skill(
     };
     work(move || core::review::review(&v, &id, decision, false)).await
 }
+/// Every pending description, read only, for the batch review list.
+#[tauri::command]
+pub async fn pending_descriptions(
+    state: tauri::State<'_, Desktop>,
+) -> Result<Vec<core::review::PendingDescription>, Error> {
+    let v = state.vault()?;
+    work(move || core::review::pending(&v)).await
+}
+/// Read-only preview of accepting several pending descriptions together.
+#[tauri::command]
+pub async fn preview_accept_descriptions(
+    state: tauri::State<'_, Desktop>,
+    ids: Vec<String>,
+) -> Result<core::BatchReviewReport, Error> {
+    let v = state.vault()?;
+    work(move || core::review::accept_many(&v, &ids, None, true)).await
+}
+/// Accepts exactly the previewed batch in one commit; a changed state refuses
+/// the token with `REVIEW_PREVIEW_CHANGED`.
+#[tauri::command]
+pub async fn accept_descriptions(
+    state: tauri::State<'_, Desktop>,
+    ids: Vec<String>,
+    token: String,
+) -> Result<core::BatchReviewReport, Error> {
+    let v = state.vault()?;
+    work(move || core::review::accept_many(&v, &ids, Some(&token), false)).await
+}
 #[tauri::command]
 pub async fn undo_vault(state: tauri::State<'_, Desktop>) -> Result<core::UndoReport, Error> {
     let v = state.vault()?;
     work(move || v.undo(false)).await
 }
+/// Undoes the automatic description approval of a classification run, only
+/// while its commit is still the latest vault change (0.3, r5): another
+/// change after it is never reverted in its place.
+#[tauri::command]
+pub async fn undo_auto_approval(
+    state: tauri::State<'_, Desktop>,
+    commit: String,
+) -> Result<core::UndoReport, Error> {
+    let v = state.vault()?;
+    work(move || {
+        if v.undo(true)?.reverted_commit != commit {
+            return Err(core::Error::decision(
+                "AUTO_APPROVAL_NOT_LATEST",
+                "The vault changed after the automatic approval; undo it from the vault history instead",
+            ));
+        }
+        v.undo(false)
+    })
+    .await
+}
+/// Pi's providers and models from Pi itself (`pi --list-models`) behind the
+/// classification checks; read only, no text sent (0.3, r5).
+#[tauri::command]
+pub async fn pi_models(
+    state: tauri::State<'_, Desktop>,
+) -> Result<core::agent_runner::pi::PiModelList, Error> {
+    let v = state.vault()?;
+    work(move || core::agent_runner::pi::list_models(&v)).await
+}
 
 fn classify_options(
     id: Option<String>,
     all: Option<bool>,
+    pending: Option<bool>,
+    ids: Option<Vec<String>>,
     agent: String,
     dry_run: bool,
 ) -> core::ClassifyOptions {
+    // After a stop the window continues with exactly the remaining skills,
+    // never the whole vault again (review of 18ea598, finding 1).
+    let pending = ids.is_none() && pending.unwrap_or(false);
+    let (ids, all) = match ids {
+        Some(ids) => (ids, false),
+        None => (id.into_iter().collect(), all.unwrap_or(false)),
+    };
     core::ClassifyOptions {
-        ids: id.into_iter().collect(),
-        all: all.unwrap_or(false),
+        ids,
+        all,
+        pending,
         agent,
         confirmed: true,
         dry_run,
         ..Default::default()
+    }
+}
+/// The saved agent, or the user's explicit choice from the window after
+/// Codex was refused or `auto` stopped (only Claude or keywords). The window
+/// sends back the agent its preview used; a saved agent that changed since
+/// is refused instead of running another behaviour (0.3).
+fn chosen_agent(v: &Vault, choice: Option<String>) -> Result<String, Error> {
+    let saved = v.config()?.classification_agent;
+    match choice.as_deref() {
+        None => Ok(saved),
+        Some(agent @ ("claude" | "keywords")) => Ok(agent.to_owned()),
+        Some(agent) if agent == saved => Ok(saved),
+        Some(_) => Err(Error::decision(
+            "CLASSIFY_AGENT_CHANGED",
+            "The classification agent changed after the preview; review the new preview",
+        )),
     }
 }
 #[tauri::command]
@@ -219,14 +325,21 @@ pub async fn preview_classify(
     state: tauri::State<'_, Desktop>,
     id: Option<String>,
     all: Option<bool>,
+    pending: Option<bool>,
+    ids: Option<Vec<String>>,
+    agent: Option<String>,
 ) -> Result<serde_json::Value, Error> {
     let v = state.vault()?;
-    let agent = v.config()?.classification_agent;
+    let agent = chosen_agent(&v, agent)?;
     work(move || {
-        core::diagnostics::classification(&core::classify::classify(
+        let mut value = core::diagnostics::classification(&core::classify::classify(
             &v,
-            &classify_options(id, all, agent, true),
-        )?)
+            &classify_options(id, all, pending, ids, agent.clone(), true),
+        )?)?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("agent".into(), serde_json::Value::String(agent));
+        }
+        Ok(value)
     })
     .await
 }
@@ -248,28 +361,37 @@ pub struct ClassificationStatus {
     committing: bool,
     progress: core::classify::ClassifyProgress,
 }
+// The window's named invoke arguments are the IPC contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn start_classify(
     state: tauri::State<'_, Desktop>,
     id: Option<String>,
     all: Option<bool>,
+    pending: Option<bool>,
     estimate: core::TokenEstimate,
     confirmed: bool,
+    ids: Option<Vec<String>>,
+    agent: Option<String>,
+    pi_confirmation: Option<String>,
 ) -> Result<(), Error> {
     let mut current = state.classification.lock().map_err(|_| busy())?;
     if current.is_some() {
         return Err(busy());
     }
     let v = state.vault()?;
-    let agent = v.config()?.classification_agent;
+    let agent = chosen_agent(&v, agent)?;
     let job = Arc::new(ClassificationJob {
         control: Default::default(),
         state: Mutex::new(Default::default()),
     });
     *current = Some(job.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let mut options = classify_options(id, all, agent, false);
+        let mut options = classify_options(id, all, pending, ids, agent, false);
         options.confirmed = confirmed;
+        // The Pi confirmation the user accepted in the window (0.3); core
+        // refuses one for other settings or skills before any call.
+        options.pi_confirmation = pi_confirmation;
         let result = core::classify::classify_confirmed(&v, &options, &estimate, &job.control);
         let mut s = job.state.lock().unwrap_or_else(|e| e.into_inner());
         match result {
@@ -614,7 +736,8 @@ mod tests {
             serde_json::to_value(actual.agents).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
-        assert_eq!(actual.version, "0.2.0");
+        assert_eq!(actual.version, env!("CARGO_PKG_VERSION"));
+        assert!(actual.audit_rules.is_none());
         assert!(!home.exists(), "read-only bootstrap created files");
     }
 }
@@ -735,6 +858,52 @@ pub async fn desktop_settings(
     let v = state.vault()?;
     let h = home()?;
     work(move || core::settings::read(&v, &h)).await
+}
+/// An unsaved edit of the categories and definitions in the settings.
+#[derive(Deserialize)]
+pub struct TaxonomyDraft {
+    pub categories: Vec<String>,
+    pub definitions: core::taxonomy::Definitions,
+}
+#[derive(Serialize)]
+pub struct TaxonomyView {
+    pub effective: core::taxonomy::Effective,
+    /// The instructions the product sends with this draft.
+    pub preview: Option<core::agent_runner::PromptPreview>,
+    pub error: Option<Error>,
+}
+/// Read only: the definitions in effect and the exact instruction text for
+/// the saved settings or an unsaved draft. Writes nothing.
+#[tauri::command]
+pub async fn classification_guide(
+    state: tauri::State<'_, Desktop>,
+    draft: Option<TaxonomyDraft>,
+) -> Result<TaxonomyView, Error> {
+    let v = state.vault()?;
+    work(move || {
+        let mut config = v.config()?;
+        if let Some(draft) = draft {
+            config.categories = draft.categories;
+            config.definitions = draft.definitions;
+        }
+        let effective = core::taxonomy::effective(&config);
+        // Definitions are checked even while template 1 does not send them:
+        // the settings refuse to save what template 2 could not use.
+        let checked = core::taxonomy::validate(&core::taxonomy::in_effect(&config));
+        Ok(match core::agent_runner::prompt_preview(&config) {
+            Ok(preview) => TaxonomyView {
+                effective,
+                preview: Some(preview),
+                error: checked.err(),
+            },
+            Err(error) => TaxonomyView {
+                effective,
+                preview: None,
+                error: Some(error),
+            },
+        })
+    })
+    .await
 }
 #[tauri::command]
 pub fn vault_location_warnings(path: PathBuf) -> Result<Vec<String>, Error> {
@@ -1186,5 +1355,34 @@ mod source_job_tests {
         assert!(!source_slot_available(Some(&job)).unwrap());
         job.result.lock().unwrap().done = true;
         assert!(source_slot_available(Some(&job)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod classify_follow_up_tests {
+    use super::classify_options;
+
+    /// Review of 18ea598, finding 1: after a stop the window continues with
+    /// the remaining skills only, never the whole vault.
+    #[test]
+    fn remaining_ids_replace_a_whole_vault_selection() {
+        let options = classify_options(
+            None,
+            Some(true),
+            Some(true),
+            Some(vec!["e".into(), "f".into()]),
+            "keywords".into(),
+            false,
+        );
+        assert!(!options.all);
+        assert!(!options.pending);
+        assert_eq!(options.ids, ["e", "f"]);
+        let first = classify_options(Some("a".into()), None, None, None, "auto".into(), true);
+        assert_eq!(first.ids, ["a"]);
+        assert!(first.dry_run);
+        let pending = classify_options(None, None, Some(true), None, "claude".into(), true);
+        assert!(pending.pending);
+        assert!(!pending.all);
+        assert!(pending.ids.is_empty());
     }
 }

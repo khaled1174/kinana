@@ -27,9 +27,13 @@ impl Sandbox {
         Self { root, home, vault }
     }
     pub fn run(&self, args: &[&str]) -> Output {
+        // Since 0.3 the default `--agent auto` starts Claude: no test reaches
+        // a real agent through PATH (fixed install directories excepted; see
+        // scripts/test-without-agents.sh for a run that excludes them too).
         Command::new(env!("CARGO_BIN_EXE_kinana"))
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .arg("--vault")
             .arg(&self.vault)
             .args(args)
@@ -50,6 +54,7 @@ impl Sandbox {
         fs::write(skill.join("SKILL.md"), format!("---\nname: {name}\ndescription: Review API contracts\n---\n\n<script>untrusted()</script>\n")).unwrap();
         let meta = SkillMetadata {
             proposal_source_changed: None,
+            classification_context: None,
             pinned: false,
             id: id.into(),
             content_hash: hash_directory(&skill).unwrap(),
@@ -161,4 +166,29 @@ pub fn as_left_by_the_beta(state: &Path) {
         .unwrap();
     drop(connection);
     fs::remove_file(current).unwrap();
+}
+
+/// 0.3 r5 (owner, 2026-11-24): turns off the automatic approval of clean
+/// skills' descriptions, for tests of the manual review flow and of runs that
+/// count their commits.
+#[allow(dead_code)]
+pub fn manual_review(vault: &Path) {
+    let path = vault.join("box.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(&path, format!("auto_approve_descriptions = false\n{text}")).unwrap();
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(vault)
+        .args([
+            "-c",
+            "user.name=Kinana Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qam",
+            "Review descriptions by hand",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
 }

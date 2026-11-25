@@ -3,7 +3,7 @@ import path from 'node:path';
 export function classificationFixture(base, repo) {
  const bin=path.join(base,'classification-bin'),trace=path.join(base,'classification-trace.jsonl'),hold=path.join(base,'hold-classification');
  mkdirSync(bin,{recursive:true});
- const help=readFileSync(path.join(repo,'docs/evidence/phase-3/claude-help.txt'),'utf8');
+ const help=readFileSync(path.join(repo,'tests/fixtures/classification/claude-help.txt'),'utf8');
  const proposal={category:'design-ui',stack:['react'],stage:['review'],tags:['review'],role:'Review interface design',when_to_use:'When reviewing interface spacing and color',when_not:'For backend database work',improved_description:'Review interface spacing, typography, color, and hierarchy before changing a screen. Use for interface design reviews; skip backend database work.',overlaps_with:[],confidence:0.9};
  const script=`#!/usr/bin/python3
 import json,os,sys,time

@@ -179,6 +179,10 @@ fn config_edits_are_committed_undoable_and_reject_stale_confirmations() -> Resul
         stages: None,
         scan_paths: vec![roots.clone()],
         record_found_in: false,
+        definitions: None,
+        pi: None,
+        claude: None,
+        auto_approve_descriptions: None,
     };
     let before = fs::read(f.vault.root.join("box.toml"))?;
     let plan = settings::preview(&f.vault, &f.home, &action)?;
@@ -286,6 +290,10 @@ fn identical_settings_are_a_read_only_no_op_without_an_undo_entry() -> Result<()
         stages: None,
         scan_paths: config.scan_paths,
         record_found_in: config.record_found_in,
+        definitions: None,
+        pi: None,
+        claude: None,
+        auto_approve_descriptions: None,
     };
     let before = fs::read(f.vault.root.join("box.toml"))?;
     let head = kinana_core::gitlog::head(&f.vault.root)?;
@@ -357,10 +365,29 @@ fn explicit_audit_refresh_is_previewed_undoable_and_preserves_skill_and_dist() -
     let plan = settings::preview(&f.vault, &f.home, &action)?;
     assert!(plan.changed);
     assert_eq!(fs::read(&meta)?, old);
+    // The preview says how levels move before anything is written.
+    let upgrade = plan
+        .audit
+        .as_ref()
+        .expect("refresh_audit preview has a summary");
+    assert_eq!(upgrade.rules_version, kinana_core::audit::RULES_VERSION);
+    assert_eq!((upgrade.older, upgrade.unchanged), (1, 0));
+    assert!(upgrade.raised.is_empty());
+    assert_eq!(
+        (
+            upgrade.lowered[0].id.as_str(),
+            upgrade.lowered[0].from.as_str(),
+            upgrade.lowered[0].to.as_str()
+        ),
+        ("sample", "risky", "review")
+    );
     let result = settings::apply_controlled(&f.vault, &f.home, &action, &plan.token, None)?;
     assert!(result.changed && result.committed);
     let refreshed = kinana_core::edit::read_metadata(&f.vault, "sample")?;
-    assert_eq!(refreshed.audit.rules_version, 2);
+    assert_eq!(
+        refreshed.audit.rules_version,
+        kinana_core::audit::RULES_VERSION
+    );
     assert_eq!(refreshed.audit.level, "review");
     assert_eq!(refreshed.audit.details[0].line, Some(5));
     assert_eq!(
@@ -398,6 +425,10 @@ fn location_privacy_applies_to_new_imports_and_duplicate_discoveries() -> Result
         stages: None,
         scan_paths: vec![],
         record_found_in: false,
+        definitions: None,
+        pi: None,
+        claude: None,
+        auto_approve_descriptions: None,
     };
     let plan = settings::preview(&f.vault, &f.home, &action)?;
     settings::apply(&f.vault, &f.home, &action, &plan.token)?;
@@ -421,5 +452,278 @@ fn location_privacy_applies_to_new_imports_and_duplicate_discoveries() -> Result
                 .is_empty()
         );
     }
+    Ok(())
+}
+
+/// 0.3, batch 3: Codex cannot be chosen anew; a 0.2 box.toml that already
+/// names it keeps working and can still save its other settings.
+#[test]
+fn codex_cannot_be_chosen_but_a_kept_legacy_choice_still_saves() -> Result<()> {
+    let f = Fixture::new();
+    f.vault.init(false)?;
+    let save = |agent: &str| -> Result<()> {
+        let config = f.vault.config()?;
+        let action = Action::Save {
+            classification_agent: agent.into(),
+            categories: config.categories.clone(),
+            stacks: None,
+            stages: None,
+            scan_paths: vec![],
+            record_found_in: !config.record_found_in,
+            definitions: None,
+            pi: None,
+            claude: None,
+            auto_approve_descriptions: None,
+        };
+        let plan = settings::preview(&f.vault, &f.home, &action)?;
+        settings::apply(&f.vault, &f.home, &action, &plan.token)?;
+        Ok(())
+    };
+    let before = fs::read(f.vault.root.join("box.toml"))?;
+    assert_eq!(save("codex").unwrap_err().code, "AGENT_CODEX_UNSUPPORTED");
+    assert_eq!(fs::read(f.vault.root.join("box.toml"))?, before);
+    save("auto")?;
+    assert_eq!(f.vault.config()?.classification_agent, "auto");
+    // A box.toml written by 0.2 with Codex selected.
+    let path = f.vault.root.join("box.toml");
+    let text = fs::read_to_string(&path)?.replace(
+        "classification_agent = \"auto\"",
+        "classification_agent = \"codex\"",
+    );
+    fs::write(&path, text)?;
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(&f.vault.root)
+        .args(["commit", "-qam", "0.2 chose Codex"])
+        .status()?;
+    assert_eq!(f.vault.config()?.classification_agent, "codex");
+    save("codex")?;
+    assert_eq!(f.vault.config()?.classification_agent, "codex");
+    save("claude")?;
+    assert_eq!(f.vault.config()?.classification_agent, "claude");
+    Ok(())
+}
+
+/// 0.3, batch 4: Pi stays off and unwritten until enabled; invalid values
+/// and choosing Pi while it is off are refused.
+#[test]
+fn pi_settings_are_validated_written_only_when_changed_and_required_for_the_agent() -> Result<()> {
+    let f = Fixture::new();
+    f.vault.init(false)?;
+    let path = f.vault.root.join("box.toml");
+    let save = |agent: &str, pi: Option<kinana_core::PiSettings>| -> Result<()> {
+        let config = f.vault.config()?;
+        let action = Action::Save {
+            classification_agent: agent.into(),
+            categories: config.categories.clone(),
+            stacks: None,
+            stages: None,
+            scan_paths: vec![],
+            record_found_in: config.record_found_in,
+            definitions: None,
+            pi,
+            claude: None,
+            auto_approve_descriptions: None,
+        };
+        let plan = settings::preview(&f.vault, &f.home, &action)?;
+        settings::apply(&f.vault, &f.home, &action, &plan.token)?;
+        Ok(())
+    };
+    save("claude", None)?;
+    assert!(!fs::read_to_string(&path)?.contains("classification_pi"));
+    assert_eq!(save("pi", None).unwrap_err().code, "AGENT_PI_DISABLED");
+    let bad = kinana_core::PiSettings {
+        enabled: true,
+        model: "--tools".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        save("claude", Some(bad)).unwrap_err().code,
+        "INVALID_PI_SETTINGS"
+    );
+    // Enabled Pi needs an explicit provider (owner, 2026-11-18); the model
+    // is optional only where Pi has a default for the provider (2026-11-24).
+    for (provider, model) in [("", ""), ("test-provider", ""), ("", "gpt-5.5")] {
+        let partial = kinana_core::PiSettings {
+            enabled: true,
+            provider: provider.into(),
+            model: model.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            save("auto", Some(partial)).unwrap_err().code,
+            "INVALID_PI_SETTINGS",
+            "{provider:?} {model:?}"
+        );
+    }
+    assert!(!fs::read_to_string(&path)?.contains("classification_pi"));
+    let pi = kinana_core::PiSettings {
+        enabled: true,
+        provider: "openai-codex".into(),
+        model: "gpt-5.5".into(),
+        thinking: "low".into(),
+        account: "subscription".into(),
+    };
+    // "Pi default": saved as an empty model, resolved when a run starts.
+    let pi_default = kinana_core::PiSettings {
+        enabled: true,
+        provider: "openai-codex".into(),
+        ..Default::default()
+    };
+    save("auto", Some(pi_default.clone()))?;
+    assert_eq!(f.vault.config()?.classification_pi, pi_default);
+    save("pi", Some(pi.clone()))?;
+    assert_eq!(f.vault.config()?.classification_pi, pi);
+    assert_eq!(f.vault.config()?.classification_agent, "pi");
+    assert!(fs::read_to_string(&path)?.contains("[classification_pi]"));
+    save("auto", Some(kinana_core::PiSettings::default()))?;
+    assert!(!fs::read_to_string(&path)?.contains("classification_pi"));
+    Ok(())
+}
+
+fn import_skill(f: &Fixture, id: &str, body: &str) -> Result<()> {
+    let source = f.root.join(format!("source-{id}"));
+    fs::create_dir(&source)?;
+    fs::write(
+        source.join("SKILL.md"),
+        format!("---\nname: {id}\ndescription: Check layout\n---\n{body}\n"),
+    )?;
+    kinana_core::import::add(
+        &f.vault,
+        source.to_str().unwrap(),
+        &f.root.join(format!("state-{id}")),
+        &kinana_core::ImportOptions {
+            allow_risky: true,
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// Make the stored audit look like it came from older rules, in one commit.
+fn store_older_audit(f: &Fixture, id: &str, level: &str) -> Result<()> {
+    let meta = f.vault.root.join(format!("meta/{id}.toml"));
+    let mut value: toml::Value = toml::from_str(&fs::read_to_string(&meta)?)?;
+    value["audit"] = toml::from_str::<toml::Value>(&format!(
+        "level='{level}'\nfindings=['older reason']\nrules_version=2\n"
+    ))?;
+    fs::write(&meta, toml::to_string(&value)?)?;
+    kinana_core::gitlog::commit_paths(
+        &f.vault.root,
+        "Keep an audit from older rules",
+        &[format!("meta/{id}.toml").into()],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn the_upgrade_summary_lists_raised_skills_first_and_writes_nothing() -> Result<()> {
+    let f = Fixture::new();
+    f.vault.init(false)?;
+    import_skill(&f, "cleanup", "```bash\nrm -rf ~\n```")?;
+    import_skill(&f, "templates", "Use `${name}` and $ARGUMENTS here.")?;
+    import_skill(&f, "plain", "Compare layouts.")?;
+    store_older_audit(&f, "cleanup", "clean")?;
+    store_older_audit(&f, "templates", "risky")?;
+    let head = kinana_core::gitlog::head(&f.vault.root)?;
+    let metas = ["cleanup", "templates", "plain"]
+        .map(|id| fs::read(f.vault.root.join(format!("meta/{id}.toml"))).unwrap());
+    let upgrade = kinana_core::audit::rules_upgrade(&f.vault)?;
+    assert_eq!(upgrade.older, 2);
+    assert_eq!(upgrade.unchanged, 1);
+    assert_eq!(upgrade.raised.len(), 1);
+    assert_eq!(
+        (upgrade.raised[0].id.as_str(), upgrade.raised[0].to.as_str()),
+        ("cleanup", "risky")
+    );
+    assert_eq!(
+        (
+            upgrade.lowered[0].id.as_str(),
+            upgrade.lowered[0].to.as_str()
+        ),
+        ("templates", "clean")
+    );
+    assert_eq!(kinana_core::audit::older_rules(&f.vault.root)?, 2);
+    // Neither the summary nor the count rewrites a stored audit.
+    assert_eq!(kinana_core::gitlog::head(&f.vault.root)?, head);
+    for (id, before) in ["cleanup", "templates", "plain"].iter().zip(&metas) {
+        assert_eq!(
+            &fs::read(f.vault.root.join(format!("meta/{id}.toml")))?,
+            before
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn the_start_prompt_needs_older_rules_and_is_recorded_only_on_a_click() -> Result<()> {
+    let f = Fixture::new();
+    f.vault.init(false)?;
+    import_skill(&f, "plain", "Compare layouts.")?;
+    // Current rules: nothing to offer.
+    assert_eq!(settings::audit_rules_prompt(&f.home, &f.vault.root)?, None);
+    store_older_audit(&f, "plain", "risky")?;
+    let meta = fs::read(f.vault.root.join("meta/plain.toml"))?;
+    let preferences = settings::preferences_path(&f.home);
+    let before = fs::read(&preferences).ok();
+    assert_eq!(
+        settings::audit_rules_prompt(&f.home, &f.vault.root)?,
+        Some(1)
+    );
+    // Asking twice (two app starts) writes nothing and still asks.
+    assert_eq!(
+        settings::audit_rules_prompt(&f.home, &f.vault.root)?,
+        Some(1)
+    );
+    assert_eq!(fs::read(&preferences).ok(), before);
+    // The user's answer is recorded; the stored audit stays as it was.
+    settings::record_audit_rules_prompt(&f.home)?;
+    assert_eq!(settings::audit_rules_prompt(&f.home, &f.vault.root)?, None);
+    assert_eq!(settings::preferred_vault(&f.home)?, f.vault.root);
+    assert_eq!(fs::read(f.vault.root.join("meta/plain.toml"))?, meta);
+    let stored = kinana_core::edit::read_metadata(&f.vault, "plain")?;
+    assert_eq!(
+        (stored.audit.rules_version, stored.audit.level.as_str()),
+        (2, "risky")
+    );
+    // A vault that does not exist yet never prompts.
+    let other = Fixture::new();
+    assert_eq!(
+        settings::audit_rules_prompt(&other.home, &other.vault.root)?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_state_is_not_prompted_and_the_answer_never_creates_new_state() -> Result<()> {
+    // Review H1: the answer used to write ~/.kinana/desktop.toml next to the
+    // legacy ~/.skillsbox state, and the next start failed with STATE_CONFLICT.
+    let f = Fixture::new();
+    f.vault.init(false)?;
+    import_skill(&f, "plain", "Compare layouts.")?;
+    store_older_audit(&f, "plain", "risky")?;
+    assert_eq!(
+        settings::audit_rules_prompt(&f.home, &f.vault.root)?,
+        Some(1)
+    );
+    // The same state, as an earlier version left it.
+    fs::rename(f.home.join(".kinana"), f.home.join(".skillsbox"))?;
+    let legacy = fs::read_dir(f.home.join(".skillsbox"))?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(settings::audit_rules_prompt(&f.home, &f.vault.root)?, None);
+    let refused = settings::record_audit_rules_prompt(&f.home).unwrap_err();
+    assert_eq!(refused.code, "MIGRATION_REQUIRED");
+    assert!(!f.home.join(".kinana").exists());
+    let after = fs::read_dir(f.home.join(".skillsbox"))?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(after, legacy);
+    // Still readable: the state check passes and the vault is found.
+    assert_eq!(
+        kinana_core::state::directory(&f.home)?,
+        f.home.join(".skillsbox")
+    );
     Ok(())
 }

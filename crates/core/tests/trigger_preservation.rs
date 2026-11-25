@@ -28,11 +28,11 @@ fn retained(original: &str, proposed: &str) -> usize {
 #[test]
 fn live_foundations_fixture_preserves_at_least_half_of_original_trigger_phrases() {
     let old: Value = serde_json::from_str(include_str!(
-        "../../../docs/evidence/phase-6/batch-2b/live-proposal.json"
+        "../../../tests/fixtures/classification/initial-proposal.json"
     ))
     .unwrap();
     let new: Value = serde_json::from_str(include_str!(
-        "../../../docs/evidence/phase-6/pre-3-core/live-trigger-proposal.json"
+        "../../../tests/fixtures/classification/revised-proposal.json"
     ))
     .unwrap();
     let original = old["original"].as_str().unwrap();

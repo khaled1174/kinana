@@ -45,6 +45,7 @@ fn executable(path: &Path, text: &str) {
 fn plan(admin_member: bool) -> SearchPlan {
     SearchPlan {
         path: vec![],
+        relative_path: vec![],
         known: vec![],
         admin_member: AdminMembership::known(admin_member),
         ..SearchPlan::current()

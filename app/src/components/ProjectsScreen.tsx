@@ -5,7 +5,7 @@ import {reasonText} from "../reasons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderPlus, FolderKanban, RefreshCw, Plus, Package, Link2, Copy, Unlink, ArrowRightLeft, Search } from "lucide-react";
-import { api, projectApi, asError, type Bundle, type CoreError, type Project, type ProjectPreview, type ProjectRequest, type Skill } from "../bridge";
+import { api, projectApi, asError, emptyFilter, type Catalog, type Bundle, type CoreError, type Project, type ProjectPreview, type ProjectRequest, type Skill } from "../bridge";
 import type { Text } from "../i18n";
 import { projectMessages } from "../project-i18n";
 import { Button } from "./ui/button";
@@ -15,15 +15,63 @@ import { Checkbox } from "./ui/checkbox";
 import { Progress } from "./ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./ui/dialog";
 import { Choice, EmptyNotice, ErrorNotice } from "./common";
+import { ScanDialog } from "./ScanDialog";
 
 type Operation = {action:"use"|"unuse"|"adopt";bundle?:boolean;id?:string;ids?:string[];agent?:string};
-export function ProjectsScreen({t}:{t:Text}) {
+function within(path:string, parent:string) {
+ const parts=(value:string)=>value.normalize("NFC").toLowerCase().split("/").filter(part=>part&&part!==".");
+ const components=parts(path);
+ return parts(parent).every((part,index)=>part===components[index]);
+}
+
+export function ProjectsScreen({t,home,onImported}:{t:Text;home:string;onImported:(committed:boolean)=>void}) {
  const p=projectMessages[t.locale as "ar"|"en"];
  const [paths,setPaths]=useState<string[]>([]),[selected,setSelected]=useState<string|null>(null),[projects,setProjects]=useState<Project[]>([]);
  const [query,setQuery]=useState(""),[loading,setLoading]=useState(false),[error,setError]=useState<CoreError|null>(null),[operation,setOperation]=useState<Operation|null>(null),[notice,setNotice]=useState(false);
- const refresh=useCallback(async()=>{setLoading(true);setError(null);try{setProjects(await projectApi.list(paths));}catch(e){setError(asError(e));}finally{setLoading(false);}},[paths]);
+ const [catalog,setCatalog]=useState<Catalog|null>(null);
+ const [skipped,setSkipped]=useState<string[]>([]);
+ const [scan,setScan]=useState<string[]|null>(null);
+ const refreshSequence=useRef(0);
+ const refresh=useCallback(async()=>{
+  const sequence=++refreshSequence.current;
+  setLoading(true);
+  setError(null);
+  try {
+   const [report,vault]=await Promise.all([projectApi.list(paths),api.catalog(emptyFilter)]);
+   if(sequence===refreshSequence.current){setProjects(report);setCatalog(vault);}
+  } catch(e) {
+   if(sequence===refreshSequence.current){setCatalog(null);setError(asError(e));}
+  } finally {
+   if(sequence===refreshSequence.current)setLoading(false);
+  }
+ },[paths]);
  useEffect(()=>{void refresh();},[refresh]);
  const project=projects.find(item=>item.path===selected);
+ const skillHashes=new Map(catalog?.items.map(({skill})=>[skill.id,skill.content_hash]));
+ const local=project?.local??[];
+ const matching=local.filter(({entry})=>entry.status==="duplicate"&&entry.skill_id&&
+  entry.content_hash&&skillHashes.get(entry.skill_id)===entry.content_hash);
+ const unmanaged=local.filter(item=>!matching.includes(item));
+ const importRoots=[...new Set(local.filter(({entry})=>entry.status!=="broken").map(({entry})=>entry.path))];
+ const importAvailable=project&&catalog&&home&&
+  !within(project.path,catalog.vault)&&!within(catalog.vault,project.path)&&
+  !within(home,project.path)&&!within(project.path,home+"/.kinana");
+ const count=importRoots.length.toLocaleString(t.locale);
+ const canOfferImport=importAvailable&&importRoots.length>0&&!skipped.includes(project.path);
+ function skipImport(path:string){setSkipped(old=>old.includes(path)?old:[...old,path]);}
+ function localSkill({agent,entry}:Project["local"][number],skillId?:string|null){
+  return <article key={`${agent}-${entry.path}`} className="local-row"
+    data-testid={skillId?"project-linked-skill":undefined} data-skill-id={skillId??undefined}>
+   <div>
+    <strong dir="auto">{visibleName(entry.name||entry.path.split("/").at(-1)||"")}</strong>
+    <Badge variant="outline">{agent==="claude"?t.claude:agent==="cursor"?t.cursor:t.codex}</Badge>
+    {skillId?<Badge variant="secondary"><bdi>{visibleName(skillId)}</bdi></Badge>:
+     <Badge variant="secondary">{entry.status in t?t[entry.status as keyof Text]:entry.status}</Badge>}
+   </div>
+   <p className="project-path"><PathView path={entry.path} project={project?.path}/></p>
+   {entry.error&&<p dir="auto" className="notice">{reasonText("IMPORT_ITEM_INVALID",t.locale)}</p>}
+  </article>;
+ }
  async function choose(){try {const path=await open({directory:true,multiple:false,title:p.choose});if(typeof path==="string"){setPaths(old=>Array.from(new Set([...old,path])));setSelected(path);setNotice(false);}}catch(e){setError(asError(e));}}
  return <div className="projects-screen">
   <div className="projects-toolbar"><label className="project-search"><Search/><Input aria-label={p.search} placeholder={p.search} value={query} onChange={e=>setQuery(e.target.value)}/></label><Button variant="outline" data-testid="refresh-projects" disabled={loading} onClick={()=>void refresh()} aria-label={p.refresh} title={p.refresh}><RefreshCw/></Button><Button variant="outline" data-testid="choose-project" onClick={()=>void choose()}><FolderPlus/>{p.choose}</Button></div>
@@ -35,13 +83,32 @@ export function ProjectsScreen({t}:{t:Text}) {
     <div className="project-heading"><div><h2 dir="auto">{visibleName(project.name)}</h2><p className="project-path"><PathView path={project.path}/></p></div><Badge variant="secondary">{p.bundle}: <bdi>{project.bundle||p.noBundle}</bdi></Badge></div>
     <CodeNotices codes={project.diagnostic_codes} locale={t.locale}/>
     <div className="project-actions"><Button variant="outline" data-testid="activate-project" disabled={!['ok','no_lock'].includes(project.state)} onClick={()=>setOperation({action:"use"})}><Plus/>{p.activate}</Button><Button variant="outline" data-testid="apply-project-bundle" disabled={!['ok','no_lock'].includes(project.state)} onClick={()=>setOperation({action:"use",bundle:true})}><Package/>{p.applyBundle}</Button></div>
+    {canOfferImport&&<section className="project-import-offer" aria-label={p.reviewLocal} data-testid="project-import-offer">
+     <p role="status">{t.locale==="ar"?`وجدنا ${count} مهارة في هذا المشروع`:`Local skills found in this project: ${count}`}</p>
+     <div className="button-row">
+      <Button data-testid="review-project-skills" disabled={loading}
+       onClick={()=>setScan(importRoots)}>{p.reviewLocal}</Button>
+      <Button variant="ghost" data-testid="skip-project-skills" onClick={()=>skipImport(project.path)}>{p.skipLocal}</Button>
+     </div>
+    </section>}
     <div className="project-section-title"><h3>{p.active}</h3>{project.activations.length>0&&<Button variant="ghost" size="sm" data-testid="unuse-all" onClick={()=>setOperation({action:"unuse",ids:Array.from(new Set(project.activations.map(a=>a.id)))})}><Unlink/>{p.removeAll}</Button>}</div>
     <div className="activation-list" data-testid="project-activations">{project.activations.length?project.activations.map(a=><article className="activation-row" key={`${a.agent}-${a.id}`} data-testid={`activation-${a.agent}-${a.id}`} data-state={a.state}><div className="activation-top"><strong dir="auto">{visibleName(a.name)}</strong><Badge variant="outline">{a.agent==="claude"?t.claude:a.agent==="cursor"?t.cursor:t.codex}</Badge><span className={`project-state state-${a.state}`} title={reasonText(a.reason_code,t.locale)}>{a.state in p?p[a.state as keyof typeof p]:a.state}</span></div><div className="activation-meta"><span>{a.mode==="link"?<Link2/>:<Copy/>}{a.mode==="link"?p.link:p.copy} · {a.invocation==="manual"?p.manual:p.auto}</span><Button variant="ghost" size="sm" data-testid={`unuse-${a.agent}-${a.id}`} onClick={()=>setOperation({action:"unuse",id:a.id,agent:a.agent})}><Unlink/>{p.remove}</Button></div><p className="project-path"><PathView path={a.target} project={project.path}/></p>{a.agent==="cursor"&&<p className="project-help" data-testid="cursor-editor-support">{p.cursorSupport}</p>}{a.target.includes("/.agents/skills/")&&<p className="project-help" data-testid="shared-agent-path"><bdi dir="ltr">.agents/skills</bdi> · {p.sharedPath}</p>}{a.state!=="current"&&<p className="notice" dir="auto">{reasonText(a.reason_code,t.locale)}</p>}</article>):<p className="project-empty">{p.noActive}</p>}</div>
+    {matching.length>0&&<section aria-label={p.linkedLocal} data-testid="project-linked-skills">
+     <div className="project-section-title"><h3>{p.linkedLocal}</h3></div>
+     <div>{matching.map(item=>localSkill(item,item.entry.skill_id))}</div>
+    </section>}
     <div className="project-section-title"><h3>{p.local}</h3>{project.local.length>0&&<Button variant="outline" size="sm" data-testid="adopt-project" onClick={()=>setOperation({action:"adopt"})}><ArrowRightLeft/>{p.adopt}</Button>}</div>
     <p className="project-help">{p.localNote}</p>
-    <div className="local-list">{project.local.length?project.local.map(({agent,entry})=><article key={entry.path} className="local-row"><div><strong dir="auto">{visibleName((entry.name||entry.path.split('/').at(-1))??"")}</strong><Badge variant="outline">{agent==="claude"?t.claude:agent==="cursor"?t.cursor:t.codex}</Badge><Badge variant="secondary">{entry.status in t?t[entry.status as keyof Text]:entry.status}</Badge></div><p className="project-path"><PathView path={entry.path} project={project.path}/></p>{entry.error&&<p dir="auto" className="notice">{reasonText("IMPORT_ITEM_INVALID",t.locale)}</p>}</article>):<p className="project-empty">{p.noLocal}</p>}</div>
+    <div className="local-list">{unmanaged.length?unmanaged.map(item=>localSkill(item)):
+     <p className="project-empty">{p.noLocal}</p>}</div>
    </>:<EmptyNotice title={p.select} body={p.selectBody}/>}</section>
   </div>
+  {scan&&<ScanDialog t={t} roots={scan} onScanned={()=>{}} onClose={()=>setScan(null)}
+   onImported={async committed=>{
+    setScan(null);
+    onImported(committed);
+    await refresh();
+   }}/>}
   {operation&&project&&<ProjectDialog t={t} project={project.path} operation={operation} onClose={()=>setOperation(null)} onSaved={async()=>{setNotice(true);await refresh();}}/>}
  </div>;
 }

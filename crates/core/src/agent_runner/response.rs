@@ -41,18 +41,6 @@ pub fn parse_proposal(text: &str, allowed: &AllowedValues<'_>) -> Result<Classif
         ));
     }
     let result = results[0];
-    if result.get("subtype").and_then(Value::as_str) != Some("success") {
-        return Err(Error::new(
-            "AGENT_RESPONSE_FAILED",
-            "result.subtype: must be success",
-        ));
-    }
-    if result.get("is_error").and_then(Value::as_bool) != Some(false) {
-        return Err(Error::new(
-            "AGENT_RESPONSE_FAILED",
-            "result.is_error: must be false",
-        ));
-    }
     if let Some(denials) = result
         .get("permission_denials")
         .filter(|value| !value.is_null())
@@ -66,6 +54,27 @@ pub fn parse_proposal(text: &str, allowed: &AllowedValues<'_>) -> Result<Classif
                 "result.permission_denials: permission-gated actions are not allowed",
             ));
         }
+    }
+    if events
+        .iter()
+        .any(|event| stop_signal(event).is_some_and(|(_, reason)| reason == "refusal"))
+    {
+        return Err(Error::new(
+            "AGENT_REFUSED",
+            "Claude reported a structured refusal",
+        ));
+    }
+    if result.get("subtype").and_then(Value::as_str) != Some("success") {
+        return Err(Error::new(
+            "AGENT_RESPONSE_FAILED",
+            "result.subtype: must be success",
+        ));
+    }
+    if result.get("is_error").and_then(Value::as_bool) != Some(false) {
+        return Err(Error::new(
+            "AGENT_RESPONSE_FAILED",
+            "result.is_error: must be false",
+        ));
     }
     if let Some(value) = result
         .get("structured_output")
@@ -89,13 +98,81 @@ pub fn parse_proposal(text: &str, allowed: &AllowedValues<'_>) -> Result<Classif
     proposal(&value.0, allowed, "result.result")
 }
 
-fn proposal(
+fn stop_signal(event: &Value) -> Option<(&'static str, &'static str)> {
+    let (kind, data) = match event["type"].as_str()? {
+        "assistant" if event["message"]["role"] == "assistant" => {
+            ("assistant.message", &event["message"])
+        }
+        "result" => ("result", event),
+        "stream_event" if event["event"]["type"] == "message_delta" => {
+            ("stream_event.message_delta", &event["event"]["delta"])
+        }
+        _ => return None,
+    };
+    if data.pointer("/stop_details/type").and_then(Value::as_str) == Some("refusal") {
+        return Some((kind, "refusal"));
+    }
+    let reason = match data["stop_reason"].as_str()? {
+        "end_turn" => "end_turn",
+        "max_tokens" => "max_tokens",
+        "stop_sequence" => "stop_sequence",
+        "tool_use" => "tool_use",
+        "pause_turn" => "pause_turn",
+        "refusal" => "refusal",
+        "model_context_window_exceeded" => "model_context_window_exceeded",
+        _ => return None,
+    };
+    Some((kind, reason))
+}
+
+pub(super) fn event_summary(stdout: &[u8], id: &str, attempt: usize) -> crate::ClaudeEventSummary {
+    let mut summary = crate::ClaudeEventSummary {
+        id: id.into(),
+        attempt,
+        model: None,
+        stop_reason: None,
+        event_type: None,
+        refused: false,
+        unparsed_tool_input: false,
+    };
+    for line in stdout.split(|byte| *byte == b'\n') {
+        let Ok(UniqueJson(event)) = serde_json::from_slice::<UniqueJson>(line) else {
+            continue;
+        };
+        if event["type"] == "system" && event["subtype"] == "init" && summary.model.is_none() {
+            summary.model = event["model"]
+                .as_str()
+                .filter(|name| !name.is_empty() && super::pi::plain(name, 128))
+                .map(str::to_owned);
+        }
+        if let Some((kind, reason)) = stop_signal(&event)
+            && (reason == "refusal" || !summary.refused)
+        {
+            summary.event_type = Some(kind.into());
+            summary.stop_reason = Some(reason.into());
+            summary.refused = reason == "refusal";
+        }
+        if event["type"] == "assistant"
+            && let Some(blocks) = event["message"]["content"].as_array()
+        {
+            summary.unparsed_tool_input |= blocks.iter().any(|block| {
+                block["type"] == "tool_use"
+                    && block["name"] == "StructuredOutput"
+                    && block["input"].get("__unparsedToolInput").is_some()
+            });
+        }
+    }
+    summary
+}
+
+pub(super) fn proposal(
     value: &Value,
     allowed: &AllowedValues<'_>,
     path: &str,
 ) -> Result<ClassificationProposal> {
     const STRINGS: &[&str] = &[
         "category",
+        "category_reason",
         "role",
         "when_to_use",
         "when_not",
@@ -148,6 +225,16 @@ fn proposal(
     if !value["confidence"].is_number() {
         return Err(invalid_proposal(&format!(
             "{path}.confidence: must be a number"
+        )));
+    }
+    // Required non-empty from the agent; stored proposals from before 0.3
+    // have none and stay valid.
+    if value["category_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.trim().is_empty())
+    {
+        return Err(invalid_proposal(&format!(
+            "{path}.category_reason: must not be empty"
         )));
     }
     let proposal: ClassificationProposal =

@@ -21,6 +21,9 @@ fn with_dimensions(value: &mut Value) {
             if object.contains_key("improved_description") {
                 object.entry("stack").or_insert_with(|| json!(["react"]));
                 object.entry("stage").or_insert_with(|| json!(["review"]));
+                object
+                    .entry("category_reason")
+                    .or_insert_with(|| json!("Reviews browser components."));
             }
             if let Some(Value::String(text)) = object.get_mut("result")
                 && let Ok(mut inner) = serde_json::from_str::<Value>(text)
@@ -68,7 +71,12 @@ fn captures_recorded_before_dimensions_are_rejected_until_both_fields_are_presen
     for capture in CAPTURES {
         let error = parse_current(capture, &allowed).unwrap_err();
         assert_eq!(error.code, "INVALID_AGENT_PROPOSAL");
-        assert!(error.message.contains("stack") && error.message.contains("required"));
+        // The captures predate the dimensions and the 0.3 reason; the first
+        // missing field is named.
+        assert!(
+            (error.message.contains("stack") || error.message.contains("category_reason"))
+                && error.message.contains("required")
+        );
         let proposal = parse_proposal(capture, &categories).unwrap();
         assert_eq!(proposal.stack, ["react"]);
         assert_eq!(proposal.stage, ["review"]);
