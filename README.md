@@ -1,56 +1,149 @@
+![An emerald quiver holding four arrows with code, document, gear, and shield motifs against a navy background](docs/assets/hero.png)
+
 # Kinana
 
-كنانة مخزن شخصي لمهارات الوكلاء على macOS. يجمع ملفات `SKILL.md` في مخزن محلي، ويساعدك على فحصها والبحث فيها وتجميعها وتفعيل ما تختاره لكل مشروع. توفر الواجهة العربية والإنجليزية إمكانات المحرك نفسه الذي تستخدمه أداة `kinana` المضمّنة في التطبيق.
+**Kinana — a quiver for your AI agent skills.**
 
-## بيتا 0.3.0 على macOS
+[![Version 0.3.0](https://img.shields.io/badge/version-0.3.0-0F5C4A)](https://github.com/khaled1174/kinana/releases/tag/v0.3.0-beta)
+[![Platform macOS arm64](https://img.shields.io/badge/macOS-arm64-334155)](#install)
+[![MIT license](https://img.shields.io/badge/license-MIT-334155)](LICENSE)
+[![Beta release](https://img.shields.io/badge/status-beta-9A5B16)](RELEASE_NOTES_0.3.0-beta.md)
 
-- الحزمة لأجهزة Apple Silicon (`arm64`).
-- macOS **27.0** أو أحدث هو الحد الأدنى في الحزمة. جرى التحقق من الحزمة على **macOS 27.2.1**. إجراءات التحقق من التنزيل موجودة في [دليل التثبيت](docs/installation.md).
-- استخدم أدوات سطر الأوامر من Apple إذا طلبها التطبيق لإدارة Git في المخزن. وكيل التصنيف اختياري. يعمل التصنيف المحلي بالكلمات المفتاحية دون تسجيل دخول إلى وكيل.
+## What is Kinana?
 
-### التثبيت وأول تشغيل
+Skills tend to pile up across agent folders and project repositories. Kinana brings the ones you choose into a personal vault on your Mac. Scan and audit them in one place, classify them for easier browsing, and activate only the skills a project needs. The name *Kinana* means “quiver.”
 
-1. نزّل `Kinana-0.3.0-beta-arm64.dmg` من صفحة الإصدار وقارن SHA-256 بالقيمة المنشورة. افتح الصورة واسحب `Kinana.app` إلى **Applications**، ثم أخرج الصورة.
-2. افتح **Kinana** من **Applications** في Finder. الحزمة موقّعة بـDeveloper ID وموثّقة من Apple. قد يسألك macOS عما إذا كنت تريد فتح تطبيق نُزّل من الإنترنت. إذا ظهر تحذير تلف التطبيق أو تعذّر التحقق من المطوّر، تحقّق من التجزئة وأعد تنزيل الحزمة من صفحة الإصدار. أبقِ Gatekeeper مفعّلًا.
-3. اختر مخزنًا موجودًا أو أنشئ مخزنًا جديدًا في `~/KinanaVault` أو مسار تختاره. راجع مجلدات المهارات التي يكتشفها المعالج، واختر ما تريد استيراده بعد المعاينة. يمكنك تخطّي الوكلاء والموجّه وإكمال الإعداد لاحقًا.
+## Features
 
-### تثبيت الموجّه
+- **Scan and import.** Find skills in known agent folders, review duplicates and competing versions, then choose what to add. When you add a project, you can review and import its local skills without changing the project.
+- **Review security findings.** See a risk level and inspect the file, line, and short excerpt behind a finding. Preview imported skill text without running it.
+- **Classify with your local agent.** Use Claude Code or opt in to experimental Pi support. Review the model and estimated input before confirming a run. Offline keyword classification is also available.
+- **Approve descriptions.** Eligible proposals for clean skills and skills that need review are approved automatically by default. High-risk proposals wait for you. You can turn automatic approval off or approve selected proposals together.
+- **Activate by project.** Link skills to the vault or copy them into a project. Save sets as bundles and reuse them across projects.
+- **Use the optional router.** Ask Claude Code or Codex for suggestions from the vault and approve activation when you need it.
+- **Undo vault changes.** Git records changes to the vault so you can undo the last one. Use deactivation to remove Kinana-managed links and copies from a project.
 
-من خطوة **الموجّه** في معالج أول تشغيل أو من **الإعدادات**، افتح معاينة تثبيت الموجّه وراجع المسارين ثم أكّد. يضيف التطبيق مهارة `kinana` إلى `~/.claude/skills/kinana/` و`~/.agents/skills/kinana/`. افتح جلسة جديدة في مشروعك واطلب عرض حالة كنانة أو اقتراح مهارات. يستخدم الموجّه `/Applications/Kinana.app/Contents/MacOS/kinana` مباشرة، ويطلب موافقتك قبل التفعيل. لا يتطلب التثبيت تعديل `PATH`.
+## How it works
 
-### الخصوصية
+Agent skill folders feed the scan. Review the audit, bring your selected skills into the vault, and classify them there. Activate skills for a project or use the optional router to ask for suggestions.
 
-- كنانة لا يجمع بيانات استخدام ولا يرسل telemetry. المخزن وفهرس البحث وسجل المشاريع محفوظة على جهازك. يمكنك تعطيل حفظ مواقع المصادر في الحقل `found_in` من الإعدادات.
-- عند تأكيد التصنيف عبر Claude، يشغّل كنانة **Claude Code المثبّت عندك** بحسابك. قد يرسل الوكيل نص المهارة وسياق التصنيف إلى مزوّد الخدمة وفق إعدادات الوكيل وحسابك. تصنيف الكلمات المفتاحية يجري على الجهاز. Codex متاح للموجّه وتفعيل المهارات، وتصنيف المهارات عبره غير مدعوم في هذه البيتا.
-- عمليات الاستيراد وفحص التحديثات من GitHub أو التعامل مع Git remote تستخدم الوجهة التي تحددها. راجع محتوى المخزن وتاريخه قبل مشاركته.
+```mermaid
+flowchart LR
+    subgraph Discovery["Scan and review"]
+        direction TB
+        Folders["Agent skill folders"] --> Scan["Scan"]
+        Scan --> Audit["Security audit"]
+    end
+    subgraph Organization["Organize"]
+        direction TB
+        Import["Confirm import"] --> Classify["Classify imported skills"]
+        Classify --> Vault["Searchable vault"]
+    end
+    subgraph Project["Use in a project"]
+        direction TB
+        Router["Optional router for Claude Code and Codex"] --> Activate["Activate per project"]
+        Activate --> Agents["Claude Code / Codex / Cursor editor"]
+    end
+    Discovery --> Organization
+    Organization --> Project
+```
 
-### الإزالة الكاملة
+## Security model
 
-1. **المشاريع.** قبل حذف التطبيق، ألغِ تفعيل مهارات كنانة من كل مشروع في الواجهة أو بأمر `unuse <id> --project <path>` من الـCLI المضمّن. يراجع كنانة ملكية النسخ والروابط في `.claude/skills/` و`.agents/skills/` ووجهات `.cursor/skills/` القديمة. بعد إلغاء آخر تفعيل، راجع بقايا `.kinana.lock` أو `.skillsbox.lock` في جذر المشروع واحذف القفل الخاص بكنانة إذا بقي. احتفظ بأي مهارة أجنبية أو نسخة عدّلتها.
-2. **الموجّه العام.** احذف مجلدي `~/.claude/skills/kinana/` و`~/.agents/skills/kinana/` بعد التحقق من ملف الملكية `.skillsbox-router.toml`. إذا سبق أن استخدمت Skills Box، راجع أيضًا الموجّه القديم في `~/.claude/skills/skillsbox/` و`~/.agents/skills/skillsbox/`. إذا أضفت قواعد سماح كنانة يدويًا إلى `~/.claude/settings.json`، احذف أسطرها وحدها.
-3. **التطبيق والبيانات المحلية.** أغلق Kinana وانقل `/Applications/Kinana.app` إلى سلة المهملات. أزل `~/.kinana/` إن لم تعد بحاجة إلى الإعدادات والفهرس وسجل المشاريع والملفات المؤقتة، وأزل `~/.kinana-write.lock` بعد إغلاق أي عملية للـCLI. إن أجريت ترحيلًا، راجع `~/.skillsbox/` و`~/.kinana-migrations/` و`~/.kinana-migration-head` و`~/.kinana-migrating.json` وملفات استعادة الترحيل قبل حذفها، واحتفظ بما تحتاجه للرجوع. [دليل الترحيل](docs/migration.md)
-4. **المخزن وملفات macOS.** المخزن وتاريخه بياناتك. احتفظ بنسخة ثم احذف `~/KinanaVault` أو المسار الذي اخترته إذا أردت إزالته أيضًا. امسح عند وجودها عناصر التطبيق ذات المعرّف `io.github.khaled1174.kinana` من `~/Library/Application Support/` و`~/Library/Caches/` و`~/Library/WebKit/` و`~/Library/HTTPStorages/` و`~/Library/Preferences/` (`.plist`) و`~/Library/Saved Application State/` (`.savedState`) و`~/Library/Logs/`، وأزل الـDMG الذي نزّلته. احتفظ بإعدادات الوكلاء ومصادر المهارات الأصلية.
+Kinana treats skill files as untrusted data and audits them without running their contents. Agent classification requires confirmation and runtime evidence that the isolated process stays within its text-only interface, without tools that act on files or run commands. Vault edits have a Git history.
 
-[ملاحظات إصدار 0.3.0-beta بالعربية والإنجليزية](RELEASE_NOTES_0.3.0-beta.md) · [رخصة MIT](LICENSE)
+```mermaid
+flowchart LR
+    subgraph Local["Local audit"]
+        direction TB
+        Content["Untrusted skill content"] --> Audit["Inspect without executing"]
+        Audit --> Levels["Clean / Needs review / High risk"]
+        Levels --> Offline["No network or telemetry"]
+    end
+    subgraph Agent["Optional agent classification"]
+        direction TB
+        Confirm["User confirmation"] --> Isolate["Isolated agent with no action tools"]
+        Isolate --> Verify["Verify restrictions at runtime"]
+        Verify --> Schema["Validate the response schema"]
+    end
+    Local --> Agent
+    Local --> History["Vault changes recorded in undoable Git commits"]
+    Agent --> History
+```
 
-## البناء والاختبارات
+The audit flags patterns worth inspecting. A **Clean** result only means the audit found no signals under its current rules. Read unfamiliar skill instructions before activating them, including any files the skill tells the agent to run.
 
-يتطلب بناء المصدر Rust 1.90 أو أحدث وأدوات Xcode وعُقدة Node بالإصدار المحدد في .node-version.
+## Screenshots
 
-~~~sh
-npm --prefix app ci
-npm --prefix app run build
-cargo build --locked --release -p kinana -p kinana-desktop --features kinana-desktop/custom-protocol
-~~~
+Captured in the English desktop app with synthetic skills and projects.
 
-تُنشئ خطوة prepare-test-fixtures أدناه مدخلات اختبار اصطناعية في مسارات الاختبار القديمة محليًا. شغّل اختبارات Rust من بيئة اختبار يعزل فيها حسابك ولا يمكنها الوصول إلى أدوات الوكلاء الحية.
+| Vault | Skill details and audit |
+| --- | --- |
+| [![Vault showing searchable skills and audit indicators](docs/assets/vault.png)](docs/assets/vault.png) | [![High-risk skill details showing the audit reason, relative file and line, and excerpt](docs/assets/skill-audit.png)](docs/assets/skill-audit.png) |
 
-~~~sh
-./scripts/prepare-test-fixtures.sh
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
-npm --prefix app run test:unit
-python3 scripts/test_beta_checks.py
-~~~
+| Classification preview | Projects |
+| --- | --- |
+| [![Classification dialog showing Claude Code and an input estimate before confirmation](docs/assets/classification.png)](docs/assets/classification.png) | [![Projects screen showing activated skills for a sample project](docs/assets/projects.png)](docs/assets/projects.png) |
 
-[دليل التثبيت](docs/installation.md) · [المواصفات](docs/SPEC.md) · [عقد CLI/JSON](docs/cli-json.md) · [إشعارات الاعتماديات](THIRD_PARTY_NOTICES.md)
+## Install
+
+Kinana requires **Apple Silicon (`arm64`)** and **macOS 27.0 or later**. The signed beta was verified on **macOS 27.2.1**.
+
+1. From the [0.3.0 beta release page](https://github.com/khaled1174/kinana/releases/tag/v0.3.0-beta), download `Kinana-0.3.0-beta-arm64.dmg`, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md`. Keep them together and run `shasum -a 256 -c SHA256.txt` from that folder to verify the downloads.
+2. Open the disk image, drag **Kinana.app** to **Applications**, and eject the image.
+3. Open Kinana from **Applications**. The beta is Developer ID signed and notarized. macOS may ask you to confirm the first launch of a downloaded app. If it instead reports that the app is damaged or the developer cannot be verified, recheck the download and keep Gatekeeper enabled. [Apple’s Gatekeeper guide](https://support.apple.com/en-us/102445)
+
+## Quick start
+
+1. Open Kinana and create a vault at `~/KinanaVault`, or select an existing vault.
+2. Scan your agent skill folders. Read the audit findings and confirm the skills you want to bring into the vault.
+3. Choose **Classify unclassified skills**, check the agent and estimate, and confirm. You can use offline keywords or skip this step.
+4. Open **Projects**, choose a project, and activate individual skills or apply a bundle. If Kinana finds project-local skills, **Review and add** opens an optional import review.
+5. If you want suggestions in Claude Code or Codex, preview and confirm the router installation in **Settings**, then start a new agent session.
+
+## Supported agents
+
+| Agent | Project activation | Classification | Router |
+| --- | --- | --- | --- |
+| Claude Code | Link or copy | Supported | Supported |
+| Codex | Link or copy | Unavailable. Kinana cannot verify that Codex classification disallows local file reads. | Supported |
+| Cursor editor | Link or copy | Unavailable | Unavailable |
+| Pi | Unavailable | Experimental, off by default. Requires Pi **1.5.2**. | Unavailable |
+
+Codex and the Cursor editor share the project’s `.agents/skills/` directory. Both can see skills activated there.
+
+## CLI
+
+The CLI ships inside `Kinana.app`. These examples use the default vault and the current project directory. The last command previews a pending batch without calling a model.
+
+```sh
+KINANA=/Applications/Kinana.app/Contents/MacOS/kinana
+"$KINANA" status --project "$PWD"
+"$KINANA" suggest --project "$PWD"
+"$KINANA" list --brief
+"$KINANA" classify --pending --agent claude --dry-run
+```
+
+## Privacy
+
+Kinana has no account system or telemetry. Your vault lives in `~/KinanaVault` by default. The audit, search, and keyword classifier run without a network connection. If you approve agent classification, the locally installed Claude Code or Pi uses your existing account or provider subscription and may send skill text and classification context to that provider. Remote imports, source update checks, and Git remote operations use the destinations you choose.
+
+## Known issues
+
+- Activation has no extra prompt for high-risk skills. Read the findings before activating one.
+- Some ordinary environment reads may trigger a high-risk finding. Use **Settings → Maintenance → Refresh audit** to see what the current rules change in an existing vault.
+- Pi requires the reviewed 1.5.2 build. Skipped classification reasons are available until you close the results window.
+- Classification still uses prompt template 1. Choosing a classifier in the scan flow and editing a proposed description before approval are deferred.
+
+[Full 0.3.0 beta release notes](RELEASE_NOTES_0.3.0-beta.md)
+
+## Roadmap
+
+- Browse skills by category and see which ones are active across projects.
+- Explain why Kinana suggests grouping two skills.
+- Let users choose the classifier in the scan flow and edit proposals before approving them.
+- Evaluate the next classification prompt and its description guidance against a labeled set.
+
+## License
+
+Kinana is released under the [MIT License](LICENSE). See [Third-party notices](THIRD_PARTY_NOTICES.md) for the bundled dependencies and their licenses.
