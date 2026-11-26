@@ -1,8 +1,8 @@
-# Kinana 0.4.0 beta RC1
+# Kinana 0.4.0 beta
 
 ## Highlights
 
-Kinana 0.4 makes it easier to review skills before adding them to a vault and safer to activate high-risk skills in a project. This release candidate is for Apple Silicon Macs running macOS 27.0 or later.
+Kinana 0.4 makes it easier to review skills before adding them to a vault and safer to activate high-risk skills in a project. This beta requires an Apple Silicon Mac running macOS 27.0 or later.
 
 ## What's new
 
@@ -15,7 +15,7 @@ Kinana 0.4 makes it easier to review skills before adding them to a vault and sa
 
 ## Install
 
-Open `Kinana-0.4.0-beta-rc1-arm64.dmg` and drag **Kinana.app** to **Applications**. Launch it from there. On first launch, macOS may ask you to confirm opening an app downloaded from the internet.
+Open `Kinana-0.4.0-beta-arm64.dmg` and drag **Kinana.app** to **Applications**. Launch it from there. On first launch, macOS may ask you to confirm opening an app downloaded from the internet.
 
 ## Verify
 
@@ -23,6 +23,6 @@ Keep the disk image, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md` in the same fold
 
 ## Known issues
 
-- Pi classification is experimental and off by default. The local model list may show a model that your provider does not offer to your account.
+- Pi classification is experimental and off by default. Automated compatibility checks passed for Pi 1.5.2 and 1.6.1. Live classification with a signed-in provider is still pending. The local model list may show a model that your provider does not offer to your account.
 - Some ordinary reads may be flagged when variable names resemble credentials. Check the audit reason before approving an activation.
 - Codex can be used for activation and routing. Direct Codex classification remains unavailable.

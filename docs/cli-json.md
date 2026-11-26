@@ -91,7 +91,7 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
   "x-released-in": "0.2.0",
   "x-current-release": { "contract": 11, "released-in": "0.3.0" },
   "x-development-contract": 12,
-  "x-development-release": "0.4.0",
+  "x-development-release": "0.4.0-beta",
   "x-commands": {
     "init": {
       "$ref": "#/$defs/Init"

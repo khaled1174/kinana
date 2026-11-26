@@ -4,10 +4,10 @@
 
 **Kinana — a quiver for your AI agent skills.**
 
-[![Version 0.4.0](https://img.shields.io/badge/version-0.4.0-0F5C4A)](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta-rc1)
+[![Version 0.4.0 beta](https://img.shields.io/badge/version-0.4.0--beta-0F5C4A)](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta)
 [![Platform macOS arm64](https://img.shields.io/badge/macOS-arm64-334155)](#install)
 [![MIT license](https://img.shields.io/badge/license-MIT-334155)](LICENSE)
-[![Beta release](https://img.shields.io/badge/status-beta-9A5B16)](RELEASE_NOTES_0.4.0-beta-rc1.md)
+[![Beta release](https://img.shields.io/badge/status-beta-9A5B16)](RELEASE_NOTES_0.4.0-beta.md)
 
 ## What is Kinana?
 
@@ -89,7 +89,7 @@ Captured in the English desktop app with synthetic skills and projects.
 
 Kinana requires **Apple Silicon (`arm64`)** and **macOS 27.0 or later**. The signed beta was verified on **macOS 27.2.1**.
 
-1. From the [0.4.0 beta RC1 release page](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta-rc1), download `Kinana-0.4.0-beta-rc1-arm64.dmg`, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md`. Keep them together and run `shasum -a 256 -c SHA256.txt` from that folder to verify the downloads.
+1. From the [0.4.0 beta release page](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta), download `Kinana-0.4.0-beta-arm64.dmg`, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md`. Keep them together and run `shasum -a 256 -c SHA256.txt` from that folder to verify the downloads.
 2. Open the disk image, drag **Kinana.app** to **Applications**, and eject the image.
 3. Open Kinana from **Applications**. The beta is Developer ID signed and notarized. macOS may ask you to confirm the first launch of a downloaded app. If it instead reports that the app is damaged or the developer cannot be verified, recheck the download and keep Gatekeeper enabled. [Apple’s Gatekeeper guide](https://support.apple.com/en-us/102445)
 
@@ -131,10 +131,10 @@ Kinana has no account system or telemetry. Your vault lives in `~/KinanaVault` b
 ## Known issues
 
 - Some ordinary environment reads may trigger a high-risk finding. Use **Settings → Maintenance → Refresh audit** to see what the current rules change in an existing vault.
-- Pi’s local model list may include models your provider does not offer to your account.
-- Classification still uses prompt template 1. Choosing a classifier in the scan flow and editing a proposed description before approval are deferred.
+- Pi is experimental. Automated compatibility checks passed for Pi 1.5.2 and 1.6.1. Live classification with a signed-in provider is still pending. Its model list may include models your account cannot use.
+- Classification uses prompt template 1.
 
-[Full 0.4.0 beta RC1 release notes](RELEASE_NOTES_0.4.0-beta-rc1.md)
+[Full 0.4.0 beta release notes](RELEASE_NOTES_0.4.0-beta.md)
 
 ## Roadmap
 
