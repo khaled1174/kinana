@@ -722,6 +722,55 @@ fn remove_owned(path: &Path, expected: &Node) -> Result<()> {
     fs::remove_file(path)?;
     Ok(())
 }
+fn head_observation(saved: &Saved, work: &Path) -> Result<(Option<Node>, Option<Node>)> {
+    let current = node(&saved.home.join(HEAD))?;
+    let backup = node(&work.join("previous-head"))?;
+    let owned = current.as_ref() == Some(&saved.pending);
+    let valid = if let Some(expected) = &saved.previous_head {
+        let id: String = serde_json::from_slice(expected)
+            .map_err(|_| decision("MIGRATION_CONFLICT", "Previous migration head is invalid"))?;
+        if id == saved.id {
+            return Err(changed());
+        }
+        let previous = record(&saved.home, &id)?;
+        let previous_work = journal(&saved.home, &id)?;
+        match_node(&previous_work.join("pending.json"), &previous.pending)?;
+        if !state::exists(&previous_work.join("completed.json"))?
+            || state::exists(&previous_work.join("rolled-back.json"))?
+        {
+            return Err(changed());
+        }
+        if current.as_ref() == Some(&previous.pending) {
+            backup.is_none()
+        } else {
+            (current.is_none() || owned) && backup.as_ref() == Some(&previous.pending)
+        }
+    } else {
+        (current.is_none() || owned) && backup.is_none()
+    };
+    if !valid {
+        return Err(changed());
+    }
+    Ok((current, backup))
+}
+
+fn rollback_checkpoint(path: &Path, saved: &Saved) -> Result<Option<Node>> {
+    let observed = node(path)?;
+    if observed.as_ref().is_some_and(|node| node != &saved.pending) {
+        return Err(changed());
+    }
+    Ok(observed)
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    sync_directory(path.parent().ok_or_else(changed)?)
+}
+
 fn rollback_plan(home: &Path) -> Result<(Report, Saved)> {
     let home = index::validate_path(home)?;
     let id = pending_id(&home)?
@@ -735,6 +784,12 @@ fn rollback_plan(home: &Path) -> Result<(Report, Saved)> {
     }
     match_node(&home, &saved.home_identity)?;
     let work = journal(&home, &id)?;
+    let head = head_observation(&saved, &work)?;
+    let start_marker = rollback_checkpoint(&work.join("rollback-started.json"), &saved)?;
+    let finish_marker = rollback_checkpoint(&work.join("rolled-back.json"), &saved)?;
+    if finish_marker.is_some() && start_marker.is_none() {
+        return Err(changed());
+    }
     if tree(&state::legacy(&home))? != saved.source {
         return Err(decision(
             "MIGRATION_SOURCE_CHANGED",
@@ -777,17 +832,18 @@ fn rollback_plan(home: &Path) -> Result<(Report, Saved)> {
         router_observations.push((old, new, backup));
     }
     let state_now = node(&state::current(&home))?;
+    let state_staged = node(&work.join("new-state"))?;
+    let state_archived = node(&work.join("rolled-back-state"))?;
     if let Some(expected) = &saved.new_state {
-        if state_now.is_some() && state_now.as_ref() != Some(expected) {
-            return Err(changed());
-        }
-        if let Some(archived) = node(&work.join("rolled-back-state"))?
-            && (state_now.is_some() || &archived != expected)
+        let locations = [&state_now, &state_staged, &state_archived];
+        if locations
+            .into_iter()
+            .filter_map(Option::as_ref)
+            .collect::<Vec<_>>()
+            != [expected]
+            || (state_staged.is_some() && state::exists(&work.join("completed.json"))?)
         {
-            return Err(decision(
-                "MIGRATION_CONFLICT",
-                "A retained rollback state already exists",
-            ));
+            return Err(changed());
         }
     }
     let mut report = Report {
@@ -802,21 +858,23 @@ fn rollback_plan(home: &Path) -> Result<(Report, Saved)> {
         projects: saved
             .locks
             .iter()
-            .map(|item| LockChange {
+            .zip(&observations)
+            .map(|(item, (old, _))| LockChange {
                 project: item.change.project.clone(),
                 from: item.change.to.clone(),
                 to: item.change.from.clone(),
-                state: "restore".into(),
+                state: if old.is_some() { "restored" } else { "restore" }.into(),
             })
             .collect(),
         routers: saved
             .routers
             .iter()
-            .map(|item| RouterChange {
+            .zip(&router_observations)
+            .map(|(item, (old, _, _))| RouterChange {
                 agent: item.change.agent.clone(),
                 from: item.change.to.clone(),
                 to: item.change.from.clone(),
-                state: "restore".into(),
+                state: if old.is_some() { "restored" } else { "restore" }.into(),
             })
             .collect(),
         state_files: if saved.new_state.is_some() {
@@ -847,9 +905,13 @@ fn rollback_plan(home: &Path) -> Result<(Report, Saved)> {
             observations,
             router_observations,
             state_now,
+            state_staged,
+            state_archived,
             tree(&state::current(&home))?,
             pending_id(&home)?,
-            head_id(&home)?,
+            head,
+            start_marker,
+            finish_marker,
         ))
         .map_err(|e| Error::new("JSON_ERROR", e.to_string()))?,
     )
@@ -886,7 +948,7 @@ fn apply_with_hook(
     }
     if rollback {
         let (mut report, saved) = rollback_plan(home)?;
-        restore(&saved)?;
+        restore(&saved, hook)?;
         report.dry_run = false;
         return Ok(report);
     }
@@ -963,7 +1025,10 @@ fn apply_with_hook(
     if forward(home, projects)?.report.preview_token != token {
         return Err(changed());
     }
+    sync_directory(&work)?;
+    sync_directory(&parent)?;
     fs::hard_link(work.join("pending.json"), state::pending(home))?;
+    sync_directory(home)?;
     let result = (|| {
         match_node(home, &saved.home_identity)?;
         for (n, item) in saved.locks.iter().enumerate() {
@@ -1016,11 +1081,19 @@ fn apply_with_hook(
         }
         fs::hard_link(work.join("pending.json"), &head)?;
         save_new(&work.join("completed.json"), &true)?;
+        sync_directory(&work)?;
+        sync_directory(home)?;
+        for item in &saved.locks {
+            sync_directory(&item.change.project)?;
+        }
+        for item in &saved.routers {
+            sync_parent(&item.change.from)?;
+        }
         remove_owned(&state::pending(home), &saved.pending)?;
-        Ok(())
+        sync_directory(home)
     })();
     if let Err(mut error) = result {
-        if let Err(recovery) = restore(&saved) {
+        if let Err(recovery) = restore(&saved, &mut |_| Ok(())) {
             error.message.push_str(&format!(
                 "; recovery retained at {}: {}",
                 work.display(),
@@ -1034,11 +1107,35 @@ fn apply_with_hook(
     report.journal = Some(work);
     Ok(report)
 }
-fn restore(saved: &Saved) -> Result<()> {
+fn restore(saved: &Saved, hook: &mut impl FnMut(usize) -> Result<()>) -> Result<()> {
     let home = &saved.home;
     let work = journal(home, &saved.id)?;
-    // Whole rollback preflight precedes the first rename, including partial operations.
+    let pending = state::pending(home);
+    // Revalidate the whole recovery plan before publishing any change, even
+    // when a previous rollback has already restored some of the paths.
     rollback_plan(home)?;
+    let pending_source = work.join("pending.json");
+    match_node(&pending_source, &saved.pending)?;
+    if !state::exists(&pending)? {
+        fs::hard_link(&pending_source, &pending)?;
+    }
+    match_node(&pending, &saved.pending)?;
+    sync_directory(home)?;
+    let started = work.join("rollback-started.json");
+    if rollback_checkpoint(&started, saved)?.is_none() {
+        fs::hard_link(&pending_source, &started)?;
+    }
+    match_node(&started, &saved.pending)?;
+    sync_directory(&work)?;
+    sync_directory(work.parent().ok_or_else(changed)?)?;
+    sync_directory(home)?;
+    let mut step = 0;
+    let mut checkpoint = || {
+        step += 1;
+        hook(step)
+    };
+    checkpoint()?;
+
     for (n, item) in saved.routers.iter().enumerate().rev() {
         if item.new_before.is_none() && tree(&item.change.to)?.is_some() {
             if tree(&item.change.to)? != item.prepared {
@@ -1048,6 +1145,7 @@ fn restore(saved: &Saved) -> Result<()> {
                 &item.change.to,
                 &work.join(format!("router-rolled-back-{n}")),
             )?;
+            checkpoint()?;
         }
         let original = work.join(format!("router-old-{n}"));
         if state::exists(&original)? {
@@ -1055,47 +1153,49 @@ fn restore(saved: &Saved) -> Result<()> {
                 return Err(changed());
             }
             safe_rename::rename_no_replace(&original, &item.change.from)?;
+            checkpoint()?;
         }
+        sync_parent(&item.change.from)?;
     }
     for item in saved.locks.iter().rev() {
         if state::exists(&item.change.to)? {
             match_node(&item.change.to, &item.original)?;
             safe_rename::rename_no_replace(&item.change.to, &item.change.from)?;
             match_node(&item.change.from, &item.original)?;
+            checkpoint()?;
         }
+        sync_directory(&item.change.project)?;
     }
     if let Some(expected) = &saved.new_state
         && state::exists(&state::current(home))?
     {
         match_node(&state::current(home), expected)?;
         safe_rename::rename_no_replace(&state::current(home), &work.join("rolled-back-state"))?;
+        checkpoint()?;
     }
+    let (head_now, _) = head_observation(saved, &work)?;
     let head = home.join(HEAD);
-    if state::exists(&head)?
-        && bytes(&head)?
-            == serde_json::to_vec_pretty(&saved.id)
-                .map_err(|e| Error::new("JSON_ERROR", e.to_string()))?
-    {
-        match_node(&head, &saved.pending)?;
-        fs::remove_file(&head)?;
+    if head_now.as_ref() == Some(&saved.pending) {
+        remove_owned(&head, &saved.pending)?;
+        checkpoint()?;
     }
-    if let Some(previous) = &saved.previous_head {
-        if !state::exists(&head)? {
-            let backup = work.join("previous-head");
-            if bytes(&backup)? != *previous {
-                return Err(changed());
-            }
-            safe_rename::rename_no_replace(&backup, &head)?;
-        } else if bytes(&head)? != *previous {
-            return Err(changed());
-        }
+    if saved.previous_head.is_some() && !state::exists(&head)? {
+        safe_rename::rename_no_replace(&work.join("previous-head"), &head)?;
+        checkpoint()?;
     }
-    if state::exists(&state::pending(home))? {
-        remove_owned(&state::pending(home), &saved.pending)?;
+    head_observation(saved, &work)?;
+    sync_directory(home)?;
+    sync_directory(&work)?;
+
+    let completed = work.join("rolled-back.json");
+    if !state::exists(&completed)? {
+        fs::hard_link(&pending_source, &completed)?;
     }
-    if !state::exists(&work.join("rolled-back.json"))? {
-        save_new(&work.join("rolled-back.json"), &true)?;
-    }
+    match_node(&completed, &saved.pending)?;
+    sync_directory(&work)?;
+    checkpoint()?;
+    remove_owned(&pending, &saved.pending)?;
+    sync_directory(home)?;
     Ok(())
 }
 
@@ -1377,5 +1477,235 @@ mod tests {
         apply(&f.home, &[], true, &plan.preview_token).unwrap();
         assert_eq!(tree(&f.project).unwrap(), before);
         assert!(!state::pending(&f.home).exists());
+    }
+    #[test]
+    fn checkpoint_child() {
+        let Some(home) = std::env::var_os("KINANA_TEST_MIGRATION_HOME") else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        let projects = [
+            PathBuf::from(std::env::var_os("KINANA_TEST_PROJECT_1").unwrap()),
+            PathBuf::from(std::env::var_os("KINANA_TEST_PROJECT_2").unwrap()),
+        ];
+        let rollback = std::env::var_os("KINANA_TEST_ROLLBACK").is_some();
+        let step: usize = std::env::var("KINANA_TEST_STOP_AFTER")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let plan = preview(&home, &projects, rollback).unwrap();
+        apply_with_hook(&home, &projects, rollback, &plan.preview_token, &mut |at| {
+            if at == step {
+                // No unwinding or cleanup. The restart must recover using files only.
+                std::process::exit(91);
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn interrupt(f: &Fixture, second: &Path, step: usize, rollback: bool) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .env_clear()
+            .arg("--exact")
+            .arg("migration::tests::checkpoint_child")
+            .env("HOME", &f.home)
+            .env("KINANA_TEST_MIGRATION_HOME", &f.home)
+            .env("KINANA_TEST_PROJECT_1", &f.project)
+            .env("KINANA_TEST_PROJECT_2", second)
+            .env("KINANA_TEST_STOP_AFTER", step.to_string());
+        if rollback {
+            child.env("KINANA_TEST_ROLLBACK", "1");
+        }
+        let output = child.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(91),
+            "{step} {rollback}: {:?} {:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn rollback_can_restart_after_each_checkpoint_with_two_projects() {
+        for (forward_interrupted, checkpoints) in [(false, 6), (true, 3)] {
+            for step in 1..=checkpoints {
+                let f = Fixture::new();
+                let second = f.root.join("second-project");
+                fs::create_dir(&second).unwrap();
+                fs::copy(
+                    f.project.join(lockfile::LEGACY_NAME),
+                    second.join(lockfile::LEGACY_NAME),
+                )
+                .unwrap();
+                let projects = [f.project.clone(), second.clone()];
+                let before = projects.each_ref().map(|path| tree(path).unwrap());
+                let old = tree(&state::legacy(&f.home)).unwrap();
+                let retained = if forward_interrupted {
+                    interrupt(&f, &second, 1, false);
+                    None
+                } else {
+                    let plan = preview(&f.home, &projects, false).unwrap();
+                    apply(&f.home, &projects, false, &plan.preview_token).unwrap();
+                    fs::write(state::current(&f.home).join("newer-fixture"), b"retain me").unwrap();
+                    tree(&state::current(&f.home)).unwrap()
+                };
+                let rollback = preview(&f.home, &[], true).unwrap();
+                interrupt(&f, &second, step, true);
+                assert_eq!(
+                    state::directory(&f.home).unwrap_err().code,
+                    "MIGRATION_INCOMPLETE"
+                );
+                assert_eq!(
+                    state::write_guard(&state::current(&f.home).join("index-v2.db"), false)
+                        .err()
+                        .unwrap()
+                        .code,
+                    "MIGRATION_INCOMPLETE"
+                );
+                assert_eq!(
+                    apply(&f.home, &[], true, &rollback.preview_token)
+                        .unwrap_err()
+                        .code,
+                    "MIGRATION_PREVIEW_CHANGED"
+                );
+                let retry = preview(&f.home, &[], true).unwrap();
+                if !forward_interrupted && step == 2 {
+                    assert_eq!(
+                        retry
+                            .projects
+                            .iter()
+                            .filter(|item| item.state == "restored")
+                            .count(),
+                        1
+                    );
+                }
+                apply(&f.home, &[], true, &retry.preview_token).unwrap();
+                assert_eq!(projects.each_ref().map(|path| tree(path).unwrap()), before);
+                assert_eq!(tree(&state::legacy(&f.home)).unwrap(), old);
+                assert!(!state::pending(&f.home).exists());
+                assert!(!f.home.join(HEAD).exists());
+                assert_eq!(state::directory(&f.home).unwrap(), state::legacy(&f.home));
+                let journal = retry.journal.unwrap();
+                assert!(journal.join("rolled-back.json").is_file());
+                assert_eq!(tree(&journal.join("rolled-back-state")).unwrap(), retained);
+            }
+        }
+    }
+
+    #[test]
+    fn rollback_restores_a_previous_owned_head_after_interruption() {
+        let f = Fixture::new();
+        let first_plan = f.plan();
+        apply(
+            &f.home,
+            std::slice::from_ref(&f.project),
+            false,
+            &first_plan.preview_token,
+        )
+        .unwrap();
+        let original_head = node(&f.home.join(HEAD)).unwrap();
+        let second = f.root.join("another-project");
+        fs::create_dir(&second).unwrap();
+        fs::copy(
+            f.project.join(lockfile::NAME),
+            second.join(lockfile::LEGACY_NAME),
+        )
+        .unwrap();
+        let before = tree(&second).unwrap();
+        let plan = preview(&f.home, std::slice::from_ref(&second), false).unwrap();
+        apply(
+            &f.home,
+            std::slice::from_ref(&second),
+            false,
+            &plan.preview_token,
+        )
+        .unwrap();
+        interrupt(&f, &second, 3, true);
+        assert!(!f.home.join(HEAD).exists());
+        assert_eq!(
+            state::directory(&f.home).unwrap_err().code,
+            "MIGRATION_INCOMPLETE"
+        );
+        let retry = preview(&f.home, &[], true).unwrap();
+        apply(&f.home, &[], true, &retry.preview_token).unwrap();
+        assert_eq!(node(&f.home.join(HEAD)).unwrap(), original_head);
+        assert_eq!(tree(&second).unwrap(), before);
+        assert_eq!(state::directory(&f.home).unwrap(), state::current(&f.home));
+    }
+    #[test]
+    fn rollback_rejects_an_identical_foreign_previous_head_before_restoring() {
+        for interrupted in [false, true] {
+            let f = Fixture::new();
+            let first = f.plan();
+            apply(
+                &f.home,
+                std::slice::from_ref(&f.project),
+                false,
+                &first.preview_token,
+            )
+            .unwrap();
+            let second = f.root.join("another-project");
+            fs::create_dir(&second).unwrap();
+            fs::copy(
+                f.project.join(lockfile::NAME),
+                second.join(lockfile::LEGACY_NAME),
+            )
+            .unwrap();
+            let next = preview(&f.home, std::slice::from_ref(&second), false).unwrap();
+            let migration = apply(
+                &f.home,
+                std::slice::from_ref(&second),
+                false,
+                &next.preview_token,
+            )
+            .unwrap();
+            let head = if interrupted {
+                interrupt(&f, &second, 4, true);
+                f.home.join(HEAD)
+            } else {
+                migration.journal.unwrap().join("previous-head")
+            };
+            let contents = bytes(&head).unwrap();
+            fs::rename(&head, f.root.join("retained-head")).unwrap();
+            write_new(&head, &contents).unwrap();
+            let before = tree(&f.root).unwrap();
+            assert_eq!(
+                preview(&f.home, &[], true).unwrap_err().code,
+                "MIGRATION_CHANGED"
+            );
+            assert_eq!(tree(&f.root).unwrap(), before);
+            assert_eq!(state::pending(&f.home).exists(), interrupted);
+        }
+    }
+
+    #[test]
+    fn rollback_preflight_refuses_a_foreign_finish_marker_and_missing_state() {
+        for foreign_finish in [false, true] {
+            let f = Fixture::new();
+            let plan = f.plan();
+            let done = apply(
+                &f.home,
+                std::slice::from_ref(&f.project),
+                false,
+                &plan.preview_token,
+            )
+            .unwrap();
+            if foreign_finish {
+                let journal = done.journal.unwrap();
+                write_new(&journal.join("rolled-back.json"), b"foreign").unwrap();
+            } else {
+                fs::rename(state::current(&f.home), f.root.join("moved-aside")).unwrap();
+            }
+            let before = tree(&f.root).unwrap();
+            assert_eq!(
+                preview(&f.home, &[], true).unwrap_err().code,
+                "MIGRATION_CHANGED"
+            );
+            assert_eq!(tree(&f.root).unwrap(), before);
+            assert!(!state::pending(&f.home).exists());
+        }
     }
 }

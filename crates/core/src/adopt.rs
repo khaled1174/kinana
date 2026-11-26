@@ -10,7 +10,29 @@ use std::{
 };
 
 pub fn adopt(vault: &Vault, options: &AdoptOptions) -> Result<AdoptReport> {
-    let _state_guard = crate::state::write_guard(&vault.index_path, options.dry_run)?;
+    let (mut report, plan) = prepare(vault, options)?;
+    let Some(plan) = plan else { return Ok(report) };
+    if !plan.risky.is_empty() {
+        return Err(crate::activation_risk::decision(&plan.risky));
+    }
+    if !options.dry_run && !options.confirmed {
+        return Err(Error::decision(
+            "ADOPT_CONFIRMATION_REQUIRED",
+            format!(
+                "Review adopt --dry-run, then confirm with --yes. Candidates: {}",
+                serde_json::to_string(&report.candidates)
+                    .map_err(|error| Error::new("JSON_ERROR", error.to_string()))?
+            ),
+        ));
+    }
+    report.activation = Some(activate::execute(vault, plan, options.dry_run)?);
+    Ok(report)
+}
+
+pub(crate) fn prepare(
+    vault: &Vault,
+    options: &AdoptOptions,
+) -> Result<(AdoptReport, Option<activate::Plan>)> {
     let normalized = Vault::new(
         crate::index::validate_path(&vault.root)?,
         crate::index::validate_path(&vault.index_path)?,
@@ -122,20 +144,21 @@ pub fn adopt(vault: &Vault, options: &AdoptOptions) -> Result<AdoptReport> {
         }
     }
     if ids.is_empty() {
-        return Ok(report);
+        return Ok((report, None));
     }
-    let mut activation_options = ActivateOptions {
+    let activation_options = ActivateOptions {
         project,
         home: options.home.clone(),
         selections: ids.into_iter().collect(),
         agent: options.agent.clone(),
         mode: "link".into(),
         include_secondary: vec![],
-        dry_run: true,
+        dry_run: options.dry_run,
     };
-    let preview = activate::adopt_validated(vault, &activation_options, &targets, &pairs)?;
+    let prepared = activate::prepare_adopt(vault, &activation_options, &targets, &pairs)?;
     for candidate in &mut report.candidates {
-        if let Some(item) = preview
+        if let Some(item) = prepared
+            .report
             .items
             .iter()
             .find(|item| item.target == candidate.target)
@@ -143,26 +166,6 @@ pub fn adopt(vault: &Vault, options: &AdoptOptions) -> Result<AdoptReport> {
             candidate.link_to = Some(item.source.clone());
         }
     }
-    if options.dry_run {
-        report.activation = Some(preview);
-        return Ok(report);
-    }
-    if !options.confirmed {
-        return Err(Error::decision(
-            "ADOPT_CONFIRMATION_REQUIRED",
-            format!(
-                "Review adopt --dry-run, then confirm with --yes. Candidates: {}",
-                serde_json::to_string(&report.candidates)
-                    .map_err(|error| Error::new("JSON_ERROR", error.to_string()))?
-            ),
-        ));
-    }
-    activation_options.dry_run = false;
-    report.activation = Some(activate::adopt_validated(
-        vault,
-        &activation_options,
-        &targets,
-        &pairs,
-    )?);
-    Ok(report)
+    report.activation = Some(prepared.report.clone());
+    Ok((report, Some(prepared)))
 }

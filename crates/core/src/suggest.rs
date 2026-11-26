@@ -192,7 +192,14 @@ pub fn suggest(vault: &Vault, project: &Path) -> Result<SuggestReport> {
         .iter()
         .map(|r| (r.id.as_str(), r))
         .collect::<BTreeMap<_, _>>();
-    for bundle in bundles::list(vault)? {
+    let bundles = bundles::list(vault)?;
+    let levels = crate::activation_risk::levels(
+        vault,
+        bundles
+            .iter()
+            .flat_map(|bundle| bundle.skills.iter().map(|member| member.id.clone())),
+    );
+    for bundle in bundles {
         let matched_categories = bundle
             .skills
             .iter()
@@ -205,6 +212,11 @@ pub fn suggest(vault: &Vault, project: &Path) -> Result<SuggestReport> {
             .collect::<Vec<_>>();
         if categories.is_empty() || !matched_categories.is_empty() {
             report.bundles.push(SuggestedBundle {
+                risky_members: bundle
+                    .skills
+                    .iter()
+                    .filter(|member| levels[&member.id] == "risky")
+                    .count(),
                 match_count: matched_categories.len(),
                 matched_categories,
                 bundle,

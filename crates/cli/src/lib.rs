@@ -227,6 +227,9 @@ pub enum Commands {
         /// Explicitly activate a secondary bundle member in manual mode.
         #[arg(long)]
         include_secondary: Vec<String>,
+        /// Confirm a previously previewed non-risky plan.
+        #[arg(long)]
+        confirm: Option<String>,
     },
     /// Manage bundle membership and primary/secondary priorities.
     Bundle {

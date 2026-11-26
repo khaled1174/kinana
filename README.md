@@ -4,10 +4,10 @@
 
 **Kinana — a quiver for your AI agent skills.**
 
-[![Version 0.3.0](https://img.shields.io/badge/version-0.3.0-0F5C4A)](https://github.com/khaled1174/kinana/releases/tag/v0.3.0-beta)
+[![Version 0.4.0](https://img.shields.io/badge/version-0.4.0-0F5C4A)](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta-rc1)
 [![Platform macOS arm64](https://img.shields.io/badge/macOS-arm64-334155)](#install)
 [![MIT license](https://img.shields.io/badge/license-MIT-334155)](LICENSE)
-[![Beta release](https://img.shields.io/badge/status-beta-9A5B16)](RELEASE_NOTES_0.3.0-beta.md)
+[![Beta release](https://img.shields.io/badge/status-beta-9A5B16)](RELEASE_NOTES_0.4.0-beta-rc1.md)
 
 ## What is Kinana?
 
@@ -16,10 +16,10 @@ Skills tend to pile up across agent folders and project repositories. Kinana bri
 ## Features
 
 - **Scan and import.** Find skills in known agent folders, review duplicates and competing versions, then choose what to add. When you add a project, you can review and import its local skills without changing the project.
-- **Review security findings.** See a risk level and inspect the file, line, and short excerpt behind a finding. Preview imported skill text without running it.
+- **Review security findings.** See a risk level and inspect the file, line, and short excerpt behind a finding. Audit excerpts hide detected secret values. Preview imported skill text without running it.
 - **Classify with your local agent.** Use Claude Code or opt in to experimental Pi support. Review the model and estimated input before confirming a run. Offline keyword classification is also available.
 - **Approve descriptions.** Eligible proposals for clean skills and skills that need review are approved automatically by default. High-risk proposals wait for you. You can turn automatic approval off or approve selected proposals together.
-- **Activate by project.** Link skills to the vault or copy them into a project. Save sets as bundles and reuse them across projects.
+- **Activate by project.** Link skills to the vault or copy them into a project. Save sets as bundles and reuse them across projects. Approve high-risk activations in the app.
 - **Use the optional router.** Ask Claude Code or Codex for suggestions from the vault and approve activation when you need it.
 - **Undo vault changes.** Git records changes to the vault so you can undo the last one. Use deactivation to remove Kinana-managed links and copies from a project.
 
@@ -89,7 +89,7 @@ Captured in the English desktop app with synthetic skills and projects.
 
 Kinana requires **Apple Silicon (`arm64`)** and **macOS 27.0 or later**. The signed beta was verified on **macOS 27.2.1**.
 
-1. From the [0.3.0 beta release page](https://github.com/khaled1174/kinana/releases/tag/v0.3.0-beta), download `Kinana-0.3.0-beta-arm64.dmg`, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md`. Keep them together and run `shasum -a 256 -c SHA256.txt` from that folder to verify the downloads.
+1. From the [0.4.0 beta RC1 release page](https://github.com/khaled1174/kinana/releases/tag/v0.4.0-beta-rc1), download `Kinana-0.4.0-beta-rc1-arm64.dmg`, `SHA256.txt`, and `THIRD_PARTY_NOTICES.md`. Keep them together and run `shasum -a 256 -c SHA256.txt` from that folder to verify the downloads.
 2. Open the disk image, drag **Kinana.app** to **Applications**, and eject the image.
 3. Open Kinana from **Applications**. The beta is Developer ID signed and notarized. macOS may ask you to confirm the first launch of a downloaded app. If it instead reports that the app is damaged or the developer cannot be verified, recheck the download and keep Gatekeeper enabled. [Apple’s Gatekeeper guide](https://support.apple.com/en-us/102445)
 
@@ -108,7 +108,7 @@ Kinana requires **Apple Silicon (`arm64`)** and **macOS 27.0 or later**. The sig
 | Claude Code | Link or copy | Supported | Supported |
 | Codex | Link or copy | Unavailable. Kinana cannot verify that Codex classification disallows local file reads. | Supported |
 | Cursor editor | Link or copy | Unavailable | Unavailable |
-| Pi | Unavailable | Experimental, off by default. Requires Pi **1.5.2**. | Unavailable |
+| Pi | Unavailable | Experimental, off by default. Requires reviewed Pi **1.5.2** or **1.6.1**. | Unavailable |
 
 Codex and the Cursor editor share the project’s `.agents/skills/` directory. Both can see skills activated there.
 
@@ -130,12 +130,11 @@ Kinana has no account system or telemetry. Your vault lives in `~/KinanaVault` b
 
 ## Known issues
 
-- Activation has no extra prompt for high-risk skills. Read the findings before activating one.
 - Some ordinary environment reads may trigger a high-risk finding. Use **Settings → Maintenance → Refresh audit** to see what the current rules change in an existing vault.
-- Pi requires the reviewed 1.5.2 build. Skipped classification reasons are available until you close the results window.
+- Pi’s local model list may include models your provider does not offer to your account.
 - Classification still uses prompt template 1. Choosing a classifier in the scan flow and editing a proposed description before approval are deferred.
 
-[Full 0.3.0 beta release notes](RELEASE_NOTES_0.3.0-beta.md)
+[Full 0.4.0 beta RC1 release notes](RELEASE_NOTES_0.4.0-beta-rc1.md)
 
 ## Roadmap
 

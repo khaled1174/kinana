@@ -1,5 +1,5 @@
 use kinana_core::{
-    Audit, Classification, Description, SkillMetadata, SourceInfo, hash::hash_directory,
+    Classification, Description, SkillMetadata, SourceInfo, hash::hash_directory,
 };
 use std::{
     fs,
@@ -68,7 +68,7 @@ impl Sandbox {
                 original: "Review API contracts".into(),
                 ..Description::default()
             },
-            audit: Audit::default(),
+            audit: kinana_core::audit::audit_skill(&skill).unwrap(),
             empty_directories: vec![],
             proposal: None,
         };

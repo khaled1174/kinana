@@ -334,7 +334,15 @@ fn bundle_commands_preserve_order_priorities_and_exact_history_through_noop_and_
         .collect();
     assert_eq!(names, ["alternate-stack", "web-stack"]);
     let shown = success(sandbox, &["bundle", "show", "web-stack", "--json"]);
-    assert_eq!(shown, serde_json::to_value(&original).unwrap());
+    let clean_view = |bundle: &Bundle| {
+        let mut view = serde_json::to_value(bundle).unwrap();
+        view["risky_members"] = 0.into();
+        for member in view["skills"].as_array_mut().unwrap() {
+            member["audit_level"] = "clean".into();
+        }
+        view
+    };
+    assert_eq!(shown, clean_view(&original));
     let text = text_success(sandbox, &["bundle", "list"]);
     assert!(text.contains("web-stack\t"));
     assert!(text.contains("alternate-stack\t"));
@@ -465,12 +473,12 @@ fn bundle_commands_preserve_order_priorities_and_exact_history_through_noop_and_
     );
     assert_eq!(
         success(sandbox, &["bundle", "show", "web-stack", "--json"]),
-        serde_json::to_value(original).unwrap()
+        clean_view(&original)
     );
     assert_eq!(group_rows(sandbox), expected);
     assert_eq!(
         success(sandbox, &["bundle", "show", "alternate-stack", "--json"]),
-        serde_json::to_value(alternate).unwrap()
+        clean_view(&alternate)
     );
     fixture.assert_bundle_only();
     gitlog::ensure_clean(&sandbox.vault).unwrap();

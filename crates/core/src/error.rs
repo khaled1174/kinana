@@ -6,6 +6,8 @@ pub struct Error {
     pub code: String,
     pub reason_code: String,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_preview: Option<Box<crate::activation_risk::Decision>>,
     #[serde(skip)]
     pub needs_decision: bool,
 }
@@ -15,6 +17,7 @@ impl Error {
             code: code.into(),
             reason_code: code.into(),
             message: message.into(),
+            activation_preview: None,
             needs_decision: false,
         }
     }
@@ -23,6 +26,7 @@ impl Error {
             code: code.into(),
             reason_code: code.into(),
             message: message.into(),
+            activation_preview: None,
             needs_decision: true,
         }
     }

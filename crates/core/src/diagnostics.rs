@@ -86,6 +86,7 @@ pub fn import(report: &crate::ImportReport) -> Result<Value> {
         .zip(&report.items)
     {
         item["review_token"] = source.review_token.clone().into();
+        item["description"] = source.description.clone().into();
         let code = if item["error"].is_null() {
             None
         } else {

@@ -169,7 +169,7 @@ fn remove_then_undo_restores_tree_meta_bundles_dist_and_index() {
     let members = json(&s, &["bundle", "show", "api-kit"]);
     assert_eq!(
         members["skills"],
-        json!([{"id": "alternate", "role": "primary", "group": "contracts"}])
+        json!([{"id": "alternate", "role": "primary", "group": "contracts", "audit_level": "review"}])
     );
     let remaining = json(&s, &["list"]);
     assert_eq!(remaining.as_array().unwrap().len(), 1);
@@ -273,7 +273,7 @@ fn remove_refuses_when_a_bundle_would_become_invalid_and_keeps_an_emptied_bundle
     assert_eq!(report["bundles_changed"], json!(["api-kit"]));
     assert_eq!(
         json(&s, &["bundle", "show", "api-kit"])["skills"],
-        json!([{"id": "api", "role": "primary", "group": "contracts"}])
+        json!([{"id": "api", "role": "primary", "group": "contracts", "audit_level": "review"}])
     );
     let after_first = tree(&s.vault.join("bundles"));
     // Existing validation accepts a bundle without members: it is kept, empty.

@@ -151,6 +151,40 @@ fn claude_reports_structured_refusal_without_retry_or_raw_text() {
         })
     );
     assert!(!report.to_string().contains("private-fixture-text"));
+    let vault = kinana_core::vault::Vault::new(
+        s.vault.clone(),
+        kinana_core::state::index_path(&s.home).unwrap(),
+    );
+    let history = kinana_core::classification_history::skipped(&vault, "ui")
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.agent, "claude");
+    assert_eq!(history.reason_code, "AGENT_REFUSED");
+    assert!(history.skipped_at.ends_with('Z'));
+    let history_json = serde_json::to_value(history).unwrap();
+    assert_eq!(history_json.as_object().unwrap().len(), 3);
+    let before = snapshot(&s.vault);
+    assert!(
+        s.run(&["classify", "ui", "--agent", "keywords", "--dry-run"])
+            .status
+            .success()
+    );
+    assert!(
+        kinana_core::classification_history::skipped(&vault, "ui")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(snapshot(&s.vault), before);
+    assert!(
+        s.run(&["classify", "ui", "--agent", "keywords"])
+            .status
+            .success()
+    );
+    assert!(
+        kinana_core::classification_history::skipped(&vault, "ui")
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn run_in(s: &Sandbox, path: &std::ffi::OsStr, cwd: &Path, args: &[&str]) -> (Option<i32>, Value) {
@@ -333,7 +367,7 @@ fn auto_without_claude_on_this_computer_stops_with_a_visible_reason() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("AGENT_EXECUTABLE_NOT_FOUND"), "{stderr}");
 
-    // Pi enabled: no keywords; the run asks to use Pi before starting it.
+    // Enabling Pi cannot mint a confirmation without a verified installation.
     let config = s.vault.join("box.toml");
     let mut text = fs::read_to_string(&config).unwrap();
     text.push_str(
@@ -350,21 +384,31 @@ fn auto_without_claude_on_this_computer_stops_with_a_visible_reason() {
             .success()
     );
     let before = snapshot(&s.vault);
+    let (code, preview) = run_with(&s, &path, &["classify", "ui", "--dry-run"]);
+    assert_eq!(code, Some(0), "{preview}");
+    assert!(preview.get("pi_confirmation").is_none(), "{preview}");
     let (code, report) = run_with(&s, &path, &["classify", "ui"]);
     assert_eq!(code, Some(2), "{report}");
     assert!(report.get("fallback_reason").is_none(), "{report}");
     assert!(report["items"].as_array().unwrap().is_empty(), "{report}");
     let stopped = &report["stopped"];
-    assert_eq!(stopped["reason_code"], "PI_CONFIRMATION_REQUIRED");
+    assert_eq!(stopped["reason_code"], "AGENT_AUTO_UNAVAILABLE");
     assert_eq!(stopped["providers"][0]["status"], "failed");
     assert_eq!(
         stopped["providers"][0]["reason_code"],
         "AGENT_EXECUTABLE_NOT_FOUND"
     );
     assert_eq!(stopped["providers"][1]["agent"], "pi");
-    assert_eq!(report["pi_confirmation"]["provider"], "test-provider");
+    assert_eq!(
+        stopped["providers"][1]["reason_code"],
+        "AGENT_VERSION_UNVERIFIED"
+    );
+    assert!(report.get("pi_confirmation").is_none(), "{report}");
     assert_eq!(report["agent_calls"], 0);
-    assert!(!trace.exists(), "Pi was started before the confirmation");
+    assert!(
+        !trace.exists(),
+        "Pi was started without a verified installation"
+    );
     assert_eq!(snapshot(&s.vault), before, "nothing is written");
 }
 
@@ -557,7 +601,11 @@ fn invalid_structured_reply_skips_only_that_skill_after_one_retry() {
         assert_eq!(fs::read(s.vault.join("meta/b.toml")).unwrap(), original);
         // One classification commit, then (owner 2026-11-24, r5/r6) the
         // automatic approval of the descriptions on its own (contract 11).
-        assert_eq!(report["auto_approved"]["ids"], json!(["a", "c"]), "{report}");
+        assert_eq!(
+            report["auto_approved"]["ids"],
+            json!(["a", "c"]),
+            "{report}"
+        );
         let parent = Command::new("git")
             .arg("-C")
             .arg(&s.vault)

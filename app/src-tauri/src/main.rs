@@ -29,6 +29,7 @@ fn main() {
             bridge::cancel_settings,
             bridge::desktop_doctor,
             bridge::start_scan,
+            bridge::preview_scan_selection,
             bridge::commit_scan,
             bridge::scan_status,
             bridge::cancel_scan,

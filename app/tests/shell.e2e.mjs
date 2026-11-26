@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 const evidence = process.env.KINANA_UI_EVIDENCE||fileURLToPath(new URL('../../docs/evidence/phase-6/batch-4-5/', import.meta.url));
 describe('Kinana native Tauri shell — batches 6.4–6.5', () => {
@@ -15,7 +16,8 @@ describe('Kinana native Tauri shell — batches 6.4–6.5', () => {
   });
   it('calls the public Tauri command against the isolated HOME without mocking', async () => {
     const actual = await browser.tauri.execute(async ({ core }) => core.invoke('bootstrap'));
-    assert.equal(actual.version, '0.2.0');
+    const cliVersion = execFileSync(process.env.KINANA_TEST_CLI, ['--version'], {encoding:'utf8'}).trim();
+    assert.equal(cliVersion, `kinana ${actual.version}`);
     assert.deepEqual(actual.agents.map(a => [a.name, a.project_skills, a.global_skills]), [
       ['claude', '.claude/skills', path.join(process.env.KINANA_UI_HOME, '.claude/skills')],
       ['codex', '.agents/skills', path.join(process.env.KINANA_UI_HOME, '.agents/skills')],

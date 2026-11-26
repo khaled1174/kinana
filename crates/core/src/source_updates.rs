@@ -724,6 +724,8 @@ pub fn update(
     if content_changed || cache.changed.contains_key(&options.id) {
         refresh_manual(&dist, &options.id, generated, &mut writes)?;
     }
+    let guarded =
+        crate::activation_risk::guard_cache_writes(vault, &writes, updated.audit.level == "risky")?;
     let mut anchors = vec![];
     for path in [
         &vault.root,
@@ -795,7 +797,16 @@ pub fn update(
     // Published paths are verified against their prepared after-snapshots by
     // the transaction. Only untouched dependencies retain before-observations.
     observations.retain(|(path, _)| !writes.iter().any(|write| write.target == *path));
-    let mut filesystem = ActivationTransaction::prepare(writes, observations, anchors)?;
+    let check_stage = |target: &Path, stage: &Path| {
+        crate::activation_risk::check_cache_stage(vault, &guarded, target, stage)
+    };
+    let mut filesystem =
+        ActivationTransaction::prepare_guarded(writes, observations, anchors, &check_stage)?;
+    if let Err(error) = crate::activation_risk::recheck_cache_writes(vault, &guarded)
+        .and_then(|()| filesystem.verify_staging(&check_stage))
+    {
+        return Err(filesystem.abort(error));
+    }
     if let Err(error) = filesystem.apply().and_then(|_| filesystem.verify()) {
         return Err(filesystem.abort(error));
     }

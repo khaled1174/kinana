@@ -293,6 +293,39 @@ fn normalized_vault(vault: &Vault) -> Result<Vault> {
     ))
 }
 
+pub fn validate_import_description(text: &str) -> Result<()> {
+    if text.trim().is_empty()
+        || text.chars().count() > crate::agent_runner::DESCRIPTION_LIMIT
+        || text
+            .chars()
+            .any(|c| c != '\n' && (c.is_control() || crate::names::hidden_or_reordering(c)))
+    {
+        return Err(Error::new(
+            "INVALID_DESCRIPTION",
+            "A description must contain 1–1024 characters, without hidden formatting or control characters",
+        ));
+    }
+    Ok(())
+}
+
+pub fn scan_selection_token(
+    reviewed: &BTreeMap<PathBuf, (String, String)>,
+    selected: &[String],
+    primary: &[String],
+    allow_risky: bool,
+    descriptions: &BTreeMap<PathBuf, String>,
+) -> Result<String> {
+    for (path, description) in descriptions {
+        if !reviewed.contains_key(path) {
+            return Err(preview_changed());
+        }
+        validate_import_description(description)?;
+    }
+    let bytes = serde_json::to_vec(&(reviewed, selected, primary, allow_risky, descriptions))
+        .map_err(|error| Error::new("INVALID_METADATA", error.to_string()))?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 fn validate_options(options: &ImportOptions) -> Result<()> {
     if options.all && !options.select.is_empty() {
         return Err(Error::new(
@@ -709,12 +742,14 @@ fn execute(
         .map(|record| record.id.clone())
         .collect::<BTreeSet<_>>();
     let mut items = Vec::with_capacity(candidates.len());
+    let mut descriptions = options.descriptions.clone();
     for position in order {
         let candidate = &candidates[position];
         let selected = selected[position];
         let entry = &candidate.entry;
         let mut item = ImportItem {
             review_token: tokens.remove(&entry.path),
+            description: entry.description.clone(),
             id: None,
             name: entry.name.clone(),
             path: entry.path.clone(),
@@ -794,6 +829,19 @@ fn execute(
                 ids.insert(id.clone());
                 planned_names.insert(name.clone(), id.clone());
                 by_hash.insert(content_hash.clone(), id.clone());
+                let original = entry.description.clone().unwrap_or_default();
+                let mut description = Description {
+                    original,
+                    ..Default::default()
+                };
+                if let Some(edited) = descriptions.remove(&entry.path) {
+                    validate_import_description(&edited)?;
+                    description.approved_at = Some(timestamp()?);
+                    if edited != description.original {
+                        description.improved = Some(edited);
+                        description.active = "improved".into();
+                    }
+                }
                 metadata.insert(
                     id.clone(),
                     SkillMetadata {
@@ -811,10 +859,7 @@ fn execute(
                             source
                         },
                         classification: Default::default(),
-                        description: Description {
-                            original: entry.description.clone().unwrap_or_default(),
-                            ..Default::default()
-                        },
+                        description,
                         audit: item.audit.clone(),
                         empty_directories: layout::empty_directories(&entry.path)?,
                         proposal: None,
@@ -853,6 +898,12 @@ fn execute(
                 candidates.len(),
                 choices(&candidates)
             ),
+        ));
+    }
+    if !descriptions.is_empty() {
+        return Err(Error::decision(
+            "INVALID_SELECTION",
+            "Only selected new vault copies can get an approved description",
         ));
     }
     if !conflicts.is_empty() {
@@ -926,6 +977,15 @@ fn execute(
             let meta = metadata
                 .get_mut(id)
                 .ok_or_else(|| Error::new("IMPORT_ERROR", "Missing staged metadata"))?;
+            if let Some(description) = &meta.description.improved {
+                let text = fs::read_to_string(staging.join("SKILL.md"))?;
+                if !crate::build::description_fits(&text, description) {
+                    return Err(Error::new(
+                        "INVALID_DESCRIPTION",
+                        "The approved description could not be written safely to frontmatter",
+                    ));
+                }
+            }
             if item.name.as_deref() != Some(manifest.name.as_str())
                 || meta.description.original != manifest.description
             {
@@ -1668,6 +1728,110 @@ mod tests {
     impl Drop for TestRoot {
         fn drop(&mut self) {
             let _cleanup = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn scan_approves_edited_description_in_its_single_import_commit() -> Result<()> {
+        let root = TestRoot::new()?;
+        let vault = root.vault()?;
+        let source = root.skill("sample", "sample", "Sample body.")?;
+        let roots = [source.clone()];
+        let file = source.join("SKILL.md");
+        let original = fs::read(&file)?;
+        let revision = gitlog::head(&vault.root)?;
+        let preview = import_scan(
+            &vault,
+            &roots,
+            &ImportOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )?;
+        let item = &preview.items[0];
+        let reviewed = BTreeMap::from([(
+            source.clone(),
+            (
+                item.content_hash.clone().unwrap(),
+                item.review_token.clone().unwrap(),
+            ),
+        )]);
+        let description = "--- heading: \"quoted\"\n# A second line";
+        let mut options = ImportOptions {
+            select: vec![source.to_string_lossy().into_owned()],
+            reviewed: Some(reviewed.clone()),
+            descriptions: BTreeMap::from([(source.clone(), description.into())]),
+            ..Default::default()
+        };
+        let token = scan_selection_token(
+            &reviewed,
+            &options.select,
+            &[],
+            false,
+            &options.descriptions,
+        )?;
+        options
+            .descriptions
+            .insert(source.clone(), "changed".into());
+        assert_ne!(
+            token,
+            scan_selection_token(
+                &reviewed,
+                &options.select,
+                &[],
+                false,
+                &options.descriptions
+            )?
+        );
+        options
+            .descriptions
+            .insert(source.clone(), description.into());
+        fs::write(
+            &file,
+            [original.as_slice(), b"Changed after review.\n"].concat(),
+        )?;
+        assert_eq!(
+            import_scan(&vault, &roots, &options).unwrap_err().code,
+            "IMPORT_PREVIEW_CHANGED"
+        );
+        assert_eq!(gitlog::head(&vault.root)?, revision);
+        fs::write(&file, &original)?;
+        assert!(import_scan(&vault, &roots, &options)?.committed);
+        let commits = std::process::Command::new("/usr/bin/git")
+            .current_dir(&vault.root)
+            .args(["rev-list", "--count", &format!("{revision}..HEAD")])
+            .output()?;
+        assert!(commits.status.success());
+        assert_eq!(String::from_utf8_lossy(&commits.stdout).trim(), "1");
+        let skills = vault.records()?;
+        assert_eq!(skills[0].description, description);
+        assert_eq!(fs::read(&file)?, original);
+        assert_eq!(
+            fs::read(vault.root.join("skills/sample/SKILL.md"))?,
+            original
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn approved_scan_description_validates_character_count_and_hidden_formatting() {
+        assert!(validate_import_description(&"ب".repeat(1024)).is_ok());
+        assert!(validate_import_description(&"ب".repeat(1025)).is_err());
+        for bad in [
+            "",
+            "only\u{200b}invisible",
+            "tab\tcharacter",
+            "right\u{202e}to left",
+        ] {
+            assert!(validate_import_description(bad).is_err(), "{bad:?}");
+        }
+        for good in [
+            "quotes: \"one\"",
+            "# literal",
+            "--- literal",
+            "line one\nline two",
+        ] {
+            assert!(validate_import_description(good).is_ok());
         }
     }
 

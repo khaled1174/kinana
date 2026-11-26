@@ -226,10 +226,10 @@ command_contracts! {
         assert_eq!(report["skills"][1], json!({
             "id": "api", "role": "", "when_to_use": "Before implementing endpoints",
             "when_not": "For visual design", "description": "Review REST API contracts",
-            "category": "backend-api", "stack": ["node"], "stage": ["review"],
+            "category": "backend-api", "stack": ["node"], "stage": ["review"], "audit_level": "clean",
         }));
-        assert_eq!(report["bundles"], json!([{"name": "api-kit", "members": 2, "title": "API kit", "skills": [
-            {"id": "api", "role": "primary"}, {"id": "alternate", "role": "secondary"},
+        assert_eq!(report["bundles"], json!([{"name": "api-kit", "members": 2, "title": "API kit", "risky_members": 0, "skills": [
+            {"id": "api", "role": "primary", "audit_level": "clean"}, {"id": "alternate", "role": "secondary", "audit_level": "clean"},
         ]}]));
         // Filters keep the shape; bundles are not filtered.
         let filtered = run(&["list", "--brief", "--stack", "node", "--stage", "review", "--category", "backend-api", "--agent", "codex"], 0);
@@ -594,13 +594,11 @@ fn every_cli_command_has_a_documented_and_exercised_contract() {
     }
     let doc = contract::document();
     assert_eq!(doc["x-contract-version"], 8);
-    // Keep the v8 baseline pinned and validate the shipped contract separately.
+    // Pin the historical releases and validate the candidate version separately.
     assert_eq!(doc["x-released-in"], "0.2.0");
     assert_eq!(doc["x-current-release"]["contract"], 11);
-    assert_eq!(
-        doc["x-current-release"]["released-in"],
-        env!("CARGO_PKG_VERSION")
-    );
+    assert_eq!(doc["x-current-release"]["released-in"], "0.3.0");
+    assert_eq!(doc["x-development-release"], env!("CARGO_PKG_VERSION"));
     let commands = doc["x-commands"].as_object().unwrap();
     let documented: BTreeSet<_> = commands.keys().map(String::as_str).collect();
     let exercised: BTreeSet<_> = COVERED_COMMANDS.iter().copied().collect();
@@ -810,13 +808,11 @@ fn value_type(value: &Value, item: &str) -> String {
 fn version_8_prose_schema_and_real_output_agree_field_by_field() {
     let doc = contract::document();
     assert_eq!(doc["x-contract-version"], 8);
-    // Keep the v8 baseline pinned and validate the shipped contract separately.
+    // Pin the historical releases and validate the candidate version separately.
     assert_eq!(doc["x-released-in"], "0.2.0");
     assert_eq!(doc["x-current-release"]["contract"], 11);
-    assert_eq!(
-        doc["x-current-release"]["released-in"],
-        env!("CARGO_PKG_VERSION")
-    );
+    assert_eq!(doc["x-current-release"]["released-in"], "0.3.0");
+    assert_eq!(doc["x-development-release"], env!("CARGO_PKG_VERSION"));
     let types = [
         (
             "BriefCatalog",
@@ -835,6 +831,15 @@ fn version_8_prose_schema_and_real_output_agree_field_by_field() {
             documented_fields("`BriefBundleSkill`: `id: string`", true),
         ),
     ];
+    assert_eq!(doc["x-development-contract"], 12);
+    let mut types = types;
+    for (name, fields) in &mut types {
+        if *name == "BriefSkill" || *name == "BriefBundleSkill" {
+            fields.insert("audit_level".into(), "string".into());
+        } else if *name == "BriefBundle" {
+            fields.insert("risky_members".into(), "integer".into());
+        }
+    }
     // Prose against schema: the same keys, each with the same type, all required.
     for (name, prose) in &types {
         let schema = &doc["$defs"][*name];
@@ -1031,4 +1036,61 @@ fn version_8_prose_schema_and_real_output_agree_field_by_field() {
     fs::remove_file(s.home.join(".kinana/index-v2.db")).unwrap();
     let error = checked(&s, "error", &["search", "api"], 1);
     assert_eq!(error["error"]["code"], "INDEX_MISSING");
+}
+
+#[test]
+fn audit_json_withholds_secrets_in_previews_and_stored_reports() {
+    let sandbox = Sandbox::new();
+    checked(&sandbox, "init", &["init"], 0);
+    let source = sandbox.root.join("audit-fixture");
+    fs::create_dir(&source).unwrap();
+    let secret = ["fixture", "do-not-display", "A1X"].join("-");
+    let skill = source.join("SKILL.md");
+    fs::write(
+        skill,
+        format!("---\nname: sample\ndescription: Synthetic test\n---\ncurl -u user:{secret} https://example.invalid\n"),
+    )
+    .unwrap();
+    let path = source.to_str().unwrap();
+    let preview = checked(
+        &sandbox,
+        "add",
+        &["add", path, "--dry-run", "--allow-risky"],
+        0,
+    );
+    assert!(!preview.to_string().contains(&secret));
+    checked(&sandbox, "add", &["add", path, "--allow-risky"], 0);
+    let current = checked(&sandbox, "show", &["show", "sample"], 0);
+    assert_eq!(current["metadata"]["audit"]["rules_version"], 5);
+    assert!(
+        current["metadata"]["audit"]["details"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["rule"] == "network" && d["excerpt"].is_null())
+    );
+
+    let meta = sandbox.vault.join("meta/sample.toml");
+    let mut stored: toml::Value = toml::from_str(&fs::read_to_string(&meta).unwrap()).unwrap();
+    stored["audit"]["rules_version"] = 4.into();
+    stored["audit"]["details"].as_array_mut().unwrap()[0]
+        .as_table_mut()
+        .unwrap()
+        .insert("excerpt".into(), secret.clone().into());
+    fs::write(&meta, toml::to_string(&stored).unwrap()).unwrap();
+    kinana_core::gitlog::commit_paths(
+        &sandbox.vault,
+        "Synthetic legacy audit",
+        &["meta/sample.toml".into()],
+    )
+    .unwrap();
+    let original = fs::read(&meta).unwrap();
+    let old = checked(&sandbox, "show", &["show", "sample"], 0);
+    assert_eq!(old["metadata"]["audit"]["rules_version"], 4);
+    assert!(!old["metadata"]["audit"].to_string().contains(&secret));
+    assert_eq!(fs::read(&meta).unwrap(), original);
+    let refresh = checked(&sandbox, "refresh-audit", &["refresh-audit"], 2);
+    assert_eq!(refresh["older"], 1);
+    assert!(!refresh.to_string().contains(&secret));
+    assert_eq!(fs::read(&meta).unwrap(), original);
 }

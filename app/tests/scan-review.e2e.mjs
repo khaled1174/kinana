@@ -42,17 +42,17 @@ describe('Scan review — first run with duplicates and drifted versions (round 
   await $('[data-testid="scan-select-emil-animations"]').click();assert.equal(await checked('scan-select-emil-animations'),false);
   const doomed=path.join(skills,'emil-marketing-pages'),aside=path.join(base,'aside-marketing-pages');renameSync(doomed,aside);
   try{
-   if(!await checked('scan-allow-risky'))await $('[data-testid="scan-allow-risky"]').click();
-   await $('[data-testid="confirm-scan-import"]').click();await $('[data-testid="scan-error"]').waitForDisplayed({timeout:30000});
-   assert.match(await $('[data-testid="scan-error"]').getText(),/تغيّرت المجلدات منذ المسح/);assert.ok(await inView('[data-testid="scan-error"]'),'error is in view');assert.ok(await inView('[data-testid="confirm-scan-import"]'));
-   assert.equal(await $('[data-testid="confirm-scan-import"]').isEnabled(),true);assert.equal(await $('[data-testid="scan-results"]').isDisplayed(),true);assert.equal(await checked('scan-select-emil-animations'),false);
+   if(await $('[data-testid="scan-allow-risky"]').isExisting()&&!await checked('scan-allow-risky'))await $('[data-testid="scan-allow-risky"]').click();
+   await $('[data-testid="confirm-scan-import"]').waitForEnabled();await $('[data-testid="confirm-scan-import"]').click();await $('[data-testid="scan-error"]').waitForDisplayed({timeout:30000});
+   assert.match(await $('[data-testid="scan-error"]').getText(),/IMPORT_PREVIEW_CHANGED.*أعد المعاينة/);assert.ok(await inView('[data-testid="scan-error"]'),'error is in view');assert.ok(await inView('[data-testid="confirm-scan-import"]'));
+   await $('[data-testid="confirm-scan-import"]').waitForEnabled();assert.equal(await $('[data-testid="scan-results"]').isDisplayed(),true);assert.equal(await checked('scan-select-emil-animations'),false);
    await browser.saveScreenshot(path.join(evidence,'scan-error-in-view-ar.png'));
   }finally{renameSync(aside,doomed);}
   assert.equal(head(),initialHead);assert.deepEqual(cli(['list']),[]);
  });
  it('counts each skill while adding, and a cancel returns to the same list with nothing saved',async()=>{
   await $(`[data-testid="scan-primary-${conflict}-1"]`).click();assert.match(await $('[data-testid="confirm-scan-import"]').getText(),new RegExp(`\\(${n(13)}\\)`));
-  await $('[data-testid="confirm-scan-import"]').click();
+  await $('[data-testid="confirm-scan-import"]').waitForEnabled();await $('[data-testid="confirm-scan-import"]').click();
   const count=$('[data-testid="scan-progress-count"]');await count.waitForDisplayed({timeout:30000});await browser.waitUntil(async()=>/[1-9١-٩]/.test((await count.getText()).split(/من|of/)[0]),{timeout:30000});
   const progress=await count.getText();assert.match(progress,new RegExp(`من ${n(13)}`));await browser.saveScreenshot(path.join(evidence,'scan-progress-ar.png'));
   await $('[data-testid="cancel-scan-import"]').click();await $('[data-testid="scan-cancelled"]').waitForDisplayed({timeout:30000});
@@ -65,7 +65,7 @@ describe('Scan review — first run with duplicates and drifted versions (round 
   await scan();assert.equal(await $(`[data-testid="scan-primary-${conflict}-1"]`).isSelected(),true);assert.equal(await checked('scan-select-emil-animations'),false);
  });
  it('adds each new skill once and records duplicates and the other version as locations',async()=>{
-  await $('[data-testid="confirm-scan-import"]').click();await browser.waitUntil(async()=>!await $('.scan-dialog').isExisting(),{timeout:90000});
+  await $('[data-testid="confirm-scan-import"]').waitForEnabled();await $('[data-testid="confirm-scan-import"]').click();await browser.waitUntil(async()=>!await $('.scan-dialog').isExisting(),{timeout:90000});
   const ids=cli(['list']).map(s=>s.id).sort();
   const expected=[...state.fresh.filter(id=>id!=='emil-animations'),'emil-color',conflict].sort();assert.deepEqual(ids,expected);
   assert.deepEqual(readdirSync(path.join(vault,'skills')).sort(),expected);

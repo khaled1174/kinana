@@ -79,3 +79,13 @@ test('the window offers the choice after exactly the stops the CLI exits 2 for',
  for(const code of ['AGENT_USAGE_LIMIT','AGENT_CREDIT_EXHAUSTED','AGENT_NOT_LOGGED_IN'])assert.ok(STOPS_THAT_ASK.includes(code),code);
  for(const code of STOPS_THAT_ASK)for(const language of ['ar','en'])assert.notEqual(reasonText(code,language),reasonText('NO_SUCH_CODE',language),code);
 });
+
+
+test('the Pi review notice uses only versions from the named Pi refusal', async()=>{
+ const {unreviewedPiVersion}=await import('../src/lib/classification.ts');
+ const pending='Pi 1.6.1 is pending review; accepted versions: 1.5.2. Pi was given no prompt.';
+ const pi={agent:'pi',status:'failed',reason_code:'AGENT_VERSION_UNVERIFIED',planned_calls:0};
+ assert.deepEqual(unreviewedPiVersion(pending,[pi]),{installed:'1.6.1',accepted:'1.5.2'});
+ assert.equal(unreviewedPiVersion(pending,[{...pi,agent:'claude'}]),undefined);
+ assert.equal(unreviewedPiVersion(pending.replace('1.6.1','unrecognized'),[pi]),undefined);
+});

@@ -46,6 +46,11 @@ fn validate_at(doc: &Value, schema: &Value, value: &Value, path: &str) -> Result
     if !matches {
         return Err(format!("{path}: expected {kind}, got {value}"));
     }
+    if let Some(choices) = schema["enum"].as_array()
+        && !choices.contains(value)
+    {
+        return Err(format!("{path}: value is outside the documented enum"));
+    }
     if let Some(items) = value.as_array() {
         for (index, item) in items.iter().enumerate() {
             validate_at(doc, &schema["items"], item, &format!("{path}[{index}]"))?;
@@ -102,6 +107,16 @@ pub fn check_schema(doc: &Value, schema: &Value) {
             "array" => {
                 check_schema(doc, &schema["items"]);
                 &["type", "items"]
+            }
+            "string" if schema.get("enum").is_some() => {
+                let choices = schema["enum"].as_array().unwrap();
+                let unique: std::collections::BTreeSet<_> = choices
+                    .iter()
+                    .map(|value| value.as_str().unwrap())
+                    .collect();
+                assert!(!choices.is_empty());
+                assert_eq!(unique.len(), choices.len(), "duplicate enum value");
+                &["type", "enum"]
             }
             "string" | "boolean" | "integer" | "number" | "null" => &["type"],
             other => panic!("Unsupported schema type: {other}"),

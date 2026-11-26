@@ -25,7 +25,7 @@ describe('Vault location warnings in Settings',()=>{
   assert.deepEqual(readFileSync(path.join(before.vault,'box.toml')),config);
   assert.equal(existsSync(path.join(home,'.kinana/desktop.toml')),false);
   const existing=path.join(home,'Documents/مخزن موجود');
-  const init=spawnSync(path.join(root,'target/debug/kinana'),['--vault',existing,'--json','init'],{env:{...process.env,HOME:home},encoding:'utf8'});
+  const init=spawnSync(process.env.KINANA_TEST_CLI,['--vault',existing,'--json','init'],{env:{...process.env,HOME:home},encoding:'utf8'});
   assert.equal(init.status,0,init.stdout+init.stderr);
   const existingConfig=readFileSync(path.join(existing,'box.toml'));
   await $('[data-testid="settings-vault-path"]').setValue(existing);

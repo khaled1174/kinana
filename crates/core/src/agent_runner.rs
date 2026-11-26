@@ -121,6 +121,8 @@ impl<'a> From<&'a BoxConfig> for AllowedValues<'a> {
 /// An out-of-list dimension carries its own stable code (`INVALID_STACK` /
 /// `INVALID_STAGE`) for stored proposals. Parsing agent output maps every
 /// rule here to `INVALID_AGENT_PROPOSAL`, exactly as for the category.
+pub(crate) const DESCRIPTION_LIMIT: usize = 1024;
+
 pub fn validate_proposal(
     proposal: &ClassificationProposal,
     allowed: &AllowedValues<'_>,
@@ -132,7 +134,7 @@ pub fn validate_proposal(
     }
     dimensions::validate(Dimension::Stack, &proposal.stack, allowed.stacks)?;
     dimensions::validate(Dimension::Stage, &proposal.stage, allowed.stages)?;
-    if proposal.improved_description.chars().count() > 1024 {
+    if proposal.improved_description.chars().count() > DESCRIPTION_LIMIT {
         return Err(invalid_proposal(
             "improved_description: maximum is 1,024 characters",
         ));
@@ -215,6 +217,7 @@ pub fn classify(
             requested,
             guide: None,
             pi: None,
+            pi_plan: None,
             claude: None,
             claude_events: false,
         },
@@ -234,6 +237,7 @@ pub struct ClassificationRequest<'a> {
     pub guide: Option<&'a str>,
     /// Pi settings from box.toml; Pi runs only when they are enabled.
     pub pi: Option<&'a crate::PiSettings>,
+    pub(crate) pi_plan: Option<&'a std::result::Result<pi::ModelPlan, pi::Closed>>,
     pub claude: Option<&'a crate::ClaudeSettings>,
     pub claude_events: bool,
 }

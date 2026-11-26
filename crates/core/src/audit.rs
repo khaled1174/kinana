@@ -96,7 +96,8 @@ impl Findings {
 
 /// Version of the audit rules; stored audits with a lower version were made by
 /// older rules and are re-audited only after an explicit preview and confirmation.
-pub const RULES_VERSION: u32 = 4;
+pub const RULES_VERSION: u32 = 5;
+pub(crate) const REDACTED_EXCERPTS_VERSION: u32 = 5;
 
 /// A stored audit level next to the level the current rules give.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -200,21 +201,39 @@ pub fn audit_skill(path: &Path) -> Result<Audit> {
             format!("Skill path is not a directory: {}", root.display()),
         ));
     }
-    let mut findings = Findings {
+    let mut findings = empty_findings();
+    inspect_directory(&root, Path::new(""), &mut findings)?;
+    Ok(finish(findings))
+}
+
+pub(crate) fn audit_payload(entries: &[crate::build::PayloadEntry]) -> Audit {
+    let mut findings = empty_findings();
+    for entry in entries {
+        if let Some(bytes) = &entry.bytes {
+            inspect_bytes(&entry.relative, &entry.permissions, bytes, &mut findings);
+        }
+    }
+    finish(findings)
+}
+
+fn empty_findings() -> Findings {
+    Findings {
         severity: Severity::Clean,
         retained_bytes: [0; 2],
         omitted: 0,
         reasons: Vec::new(),
         details: Vec::new(),
-    };
-    inspect_directory(&root, Path::new(""), &mut findings)?;
+    }
+}
+
+fn finish(mut findings: Findings) -> Audit {
     if findings.omitted != 0 {
         findings.reasons.push(format!(
             "{} additional audit findings omitted",
             findings.omitted
         ));
     }
-    Ok(Audit {
+    Audit {
         level: match findings.severity {
             Severity::Clean => "clean",
             Severity::Review => "review",
@@ -224,7 +243,7 @@ pub fn audit_skill(path: &Path) -> Result<Audit> {
         findings: findings.reasons,
         rules_version: RULES_VERSION,
         details: findings.details,
-    })
+    }
 }
 
 fn inspect_directory(root: &Path, relative: &Path, findings: &mut Findings) -> Result<()> {
@@ -316,10 +335,20 @@ fn inspect_file(
     // open a link discovered while walking the tree.
     hash::checked_absolute_path(&path)?;
     let bytes = fs::read(&path).map_err(|error| io_error(&path, error))?;
+    inspect_bytes(relative, &metadata.permissions(), &bytes, findings);
+    Ok(())
+}
+
+fn inspect_bytes(
+    relative: &Path,
+    permissions: &fs::Permissions,
+    bytes: &[u8],
+    findings: &mut Findings,
+) {
     if is_script(relative)
-        || is_executable(metadata)
+        || is_executable(permissions)
         || bytes.starts_with(b"#!")
-        || is_binary_executable(&bytes)
+        || is_binary_executable(bytes)
     {
         findings.add(
             Severity::Review,
@@ -327,8 +356,8 @@ fn inspect_file(
             "executable or script file requires review",
         );
     }
-    let text = String::from_utf8_lossy(&bytes);
-    if is_binary_executable(&bytes) {
+    let text = String::from_utf8_lossy(bytes);
+    if is_binary_executable(bytes) {
         findings.add(
             Severity::Risky,
             relative,
@@ -346,7 +375,6 @@ fn inspect_file(
     if relative.file_name().is_some_and(|name| name == "SKILL.md") {
         inspect_frontmatter(&text, relative, findings);
     }
-    Ok(())
 }
 
 fn is_script(path: &Path) -> bool {
@@ -400,13 +428,13 @@ fn is_script(path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-fn is_executable(metadata: &Metadata) -> bool {
+fn is_executable(permissions: &fs::Permissions) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
+    permissions.mode() & 0o111 != 0
 }
 
 #[cfg(not(unix))]
-fn is_executable(_metadata: &Metadata) -> bool {
+fn is_executable(_permissions: &fs::Permissions) -> bool {
     false
 }
 

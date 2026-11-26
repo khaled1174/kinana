@@ -10,10 +10,10 @@ export type Metadata = {classification_context?:{prompt_version:number;category_
 export type Filter = {query:string;category:string|null;stack?:string|null;stage?:string|null;audit:string|null;agent:string|null;state:string|null;pinned:boolean};
 export const emptyFilter:Filter={query:"",category:null,audit:null,agent:null,state:null,pinned:false};
 export type Catalog = {vault:string;categories:string[];stacks:string[];stages:string[];total:number;items:{skill:Skill;state:string;classified_by:string}[];warnings:string[];diagnostic_codes?:string[]};
-export type Detail = {frontmatter:string;markdown_body:string;detail:{skill:Skill;metadata:Metadata;raw_skill_md:string;locations:string[];variants:{path:string;content_hash:string|null;status:string}[]};projects:string[];warnings:string[];diagnostic_codes?:string[]};
-export type Bundle = {name:string;title:string;agents:string[];skills:{id:string;role:string;group?:string}[]};
+export type Detail = {skipped_classification?:{agent:string;reason_code:string;skipped_at:string};classification_history_unavailable?:boolean;frontmatter:string;markdown_body:string;detail:{skill:Skill;metadata:Metadata;raw_skill_md:string;locations:string[];variants:{path:string;content_hash:string|null;status:string}[]};projects:string[];warnings:string[];diagnostic_codes?:string[]};
+export type Bundle = {name:string;title:string;agents:string[];skills:{id:string;role:string;group?:string;audit_level?:string}[];risky_members?:number};
 export type Groups = {candidates:{skill_ids:string[];category:string|null;reasons:string[];reason_code?:string}[];warnings:string[];diagnostic_codes?:string[]};
-export type ImportReport = {source:string;dry_run:boolean;requires_preparation:boolean;items:{id:string|null;name:string|null;path:string;status:string;content_hash:string|null;review_token:string|null;audit:Audit;selected:boolean;error:string|null;reason_code?:string|null}[];imported:string[];duplicates:string[];variants:string[];committed:boolean;warnings:string[];diagnostic_codes?:string[]};
+export type ImportReport = {source:string;dry_run:boolean;requires_preparation:boolean;items:{id:string|null;name:string|null;path:string;status:string;content_hash:string|null;review_token:string|null;description?:string|null;audit:Audit;selected:boolean;error:string|null;reason_code?:string|null}[];imported:string[];duplicates:string[];variants:string[];committed:boolean;warnings:string[];diagnostic_codes?:string[]};
 export type ImportStatus = {prepared:boolean;stage:string;done:boolean;report:ImportReport|null;error:CoreError|null};
 export type ClaudeSettings = {model:string;effort:string};
 export type TokenEstimate = {claude?:ClaudeSettings;fixed_tokens_per_call:number;fixed_tokens_total:number;skill_tokens_total:number;total_input_tokens:number;retry_limit_input_tokens:number;calibration:{source_log:string;claude_version:string}|null};
@@ -48,14 +48,14 @@ export const api = {
   undoAutoApproval:(commit:string)=>invoke("undo_auto_approval",{commit}),
   piModels:()=>invoke<PiModelList>("pi_models"),
   answerAuditRules:()=>invoke<void>("answer_audit_rules_prompt"),
-  previewClassify:(id:string|undefined,all=false,agent?:string,ids?:string[],pending=false)=>invoke<ClassificationReport>("preview_classify",{id:id??null,all,pending,ids:ids??null,agent:agent??null}),
-  startClassify:(id:string|undefined,estimate:TokenEstimate,all=false,agent?:string,ids?:string[],piConfirmation?:string,pending=false)=>invoke<void>("start_classify",{id:id??null,all,pending,estimate,confirmed:true,ids:ids??null,agent:agent??null,piConfirmation:piConfirmation??null}),
+  previewClassify:(id:string|undefined,all=false,agent?:string,ids?:string[],pending=false,batchChoice=false)=>invoke<ClassificationReport>("preview_classify",{id:id??null,all,pending,ids:ids??null,agent:agent??null,batchChoice}),
+  startClassify:(id:string|undefined,estimate:TokenEstimate,all=false,agent?:string,ids?:string[],piConfirmation?:string,pending=false,batchChoice=false)=>invoke<void>("start_classify",{id:id??null,all,pending,estimate,confirmed:true,ids:ids??null,agent:agent??null,piConfirmation:piConfirmation??null,batchChoice}),
   classifyStatus:()=>invoke<{done:boolean;committing:boolean;progress:ClassificationProgress;report:ClassificationReport|null;error:CoreError|null}>("classify_status"),
   cancelClassify:()=>invoke<boolean>("cancel_classify"),
   reveal:(id:string)=>invoke<void>("reveal_skill_folder",{id}),
   bundles:()=>invoke<Bundle[]>("vault_bundles"),
   groups:()=>invoke<Groups>("vault_groups"),
-  saveBundle:(bundle:Bundle,editing:boolean,dryRun:boolean)=>invoke<{committed:boolean;warnings:string[];diagnostic_codes?:string[]}>("save_bundle",{bundle,editing,dryRun}),
+  saveBundle:(bundle:Bundle,editing:boolean,dryRun:boolean)=>invoke<{committed:boolean;warnings:string[];diagnostic_codes?:string[]}>("save_bundle",{bundle:{name:bundle.name,title:bundle.title,agents:bundle.agents,skills:bundle.skills.map(({id,role,group})=>({id,role,group}))},editing,dryRun}),
   previewImport:(input:string)=>invoke<ImportReport>("preview_import",{input}),
   prepareImport:(input:string)=>invoke<void>("prepare_import",{input}),
   importStatus:()=>invoke<ImportStatus>("import_status"),
@@ -66,11 +66,12 @@ export const bootstrap=api.bootstrap;
 export function asError(value:unknown):CoreError {return typeof value==="object" && value!==null && "code" in value && "message" in value ? value as CoreError : {code:"DESKTOP_ERROR",message:String(value)};}
 export type Project = {path:string;name:string;state:string;bundle:string|null;activations:{id:string;name:string;agent:string;mode:string;invocation:string;target:string;state:string;message:string;reason_code:string}[];local:{agent:string;entry:{path:string;name:string|null;status:string;skill_id:string|null;content_hash:string|null;error:string|null}}[];warnings:string[];diagnostic_codes?:string[]};
 export type ProjectRequest = {action:"use";project:string;selections:string[];agent:string;mode:string;include_secondary:string[]}|{action:"unuse";project:string;ids:string[];agent:string}|{action:"adopt";project:string;agent:string};
-export type ProjectPreview = {request:ProjectRequest;token:string;changed:boolean;changes:{target:string;source:string|null;id:string|null;agent:string|null;mode:string|null;invocation:string|null;changed:boolean}[];candidates:{target:string;agent:string;id:string|null;eligible:boolean;reason:string;reason_code:string;content_hash:string|null;link_to:string|null}[];warnings:string[];diagnostic_codes?:string[];gitignore_suggestions:string[]};
+export type ActivationRisk={id:string;role:string;audit_level:"risky";rules_version:number|null;details:Audit["details"]};
+export type ProjectPreview = {risky:ActivationRisk[];request:ProjectRequest;token:string;changed:boolean;changes:{target:string;source:string|null;id:string|null;agent:string|null;mode:string|null;invocation:string|null;changed:boolean}[];candidates:{target:string;agent:string;id:string|null;eligible:boolean;reason:string;reason_code:string;content_hash:string|null;link_to:string|null}[];warnings:string[];diagnostic_codes?:string[];gitignore_suggestions:string[]};
 export const projectApi = {
  list:(selected:string[])=>invoke<Project[]>("projects",{selected}),
  preview:(request:ProjectRequest)=>invoke<ProjectPreview>("preview_project",{request}),
- start:(request:ProjectRequest,token:string)=>invoke<void>("start_project",{request,token,confirmed:true}),
+ start:(request:ProjectRequest,token:string,acknowledgeRisk=false)=>invoke<void>("start_project",{request,token,confirmed:true,acknowledgeRisk}),
  status:()=>invoke<{done:boolean;committing:boolean;report:ProjectPreview|null;error:CoreError|null}>("project_status"),
  cancel:()=>invoke<boolean>("cancel_project"),
 };
@@ -95,7 +96,8 @@ export const settingsApi={
  agentLocations:(agents:string[])=>invoke<AgentSkillLocations>("agent_skill_locations",{agents}),
  read:()=>invoke<Settings>("desktop_settings"),location:(path:string)=>invoke<string[]>("vault_location_warnings",{path}),preview:(action:SettingsAction)=>invoke<SettingsPlan>("preview_settings",{action}),
  start:(action:SettingsAction,token:string)=>invoke<void>("start_settings",{action,token,confirmed:true}),status:()=>invoke<{done:boolean;committed:boolean;committing:boolean;vault:string|null;error:CoreError|null}>("settings_status"),cancel:()=>invoke<boolean>("cancel_settings"),doctor:()=>invoke<Doctor>("desktop_doctor"),
- scan:(roots:string[],reuse=false)=>invoke<void>("start_scan",{roots,reuse}),scanStatus:()=>invoke<{done:boolean;imported:boolean;stage:string;completed:number;total:number;report:ImportReport|null;error:CoreError|null}>("scan_status"),cancelScan:()=>invoke<boolean>("cancel_scan"),commitScan:(report:ImportReport,select:string[],allowRisky:boolean,primary:string[]=[])=>invoke<void>("commit_scan",{selection:{reviewed:reviewedItems(report,select),select,allow_risky:allowRisky,suffix:null,primary},confirmed:true}),
+ scan:(roots:string[],reuse=false)=>invoke<void>("start_scan",{roots,reuse}),scanStatus:()=>invoke<{done:boolean;imported:boolean;stage:string;completed:number;total:number;report:ImportReport|null;error:CoreError|null}>("scan_status"),cancelScan:()=>invoke<boolean>("cancel_scan"),previewScanSelection:(report:ImportReport,select:string[],allowRisky:boolean,primary:string[],descriptions:Record<string,string>)=>invoke<string>("preview_scan_selection",{selection:{reviewed:reviewedItems(report,select),select,allow_risky:allowRisky,suffix:null,primary,descriptions}}),
+ commitScan:(report:ImportReport,select:string[],allowRisky:boolean,primary:string[],descriptions:Record<string,string>,approvalToken:string)=>invoke<void>("commit_scan",{selection:{reviewed:reviewedItems(report,select),select,allow_risky:allowRisky,suffix:null,primary,descriptions,approval_token:approvalToken},confirmed:true}),
 };
 export type SourceStatus={id:string;status:string;reason_code:string;repository:string|null;reference:string|null;tracking_kind:string|null;old_commit:string|null;new_commit:string|null;content_changed:boolean|null;error:CoreError|null};
 export type OutdatedReport={items:SourceStatus[];groups_fetched:number;complete:boolean};

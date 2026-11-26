@@ -10,13 +10,18 @@ import {fileURLToPath} from 'node:url';
 const evidence=process.env.KINANA_UI_EVIDENCE||fileURLToPath(new URL('../../docs/evidence/phase-6/batch-4-5/',import.meta.url));
 describe('Classifier not installed anywhere the app looks',()=>{
  before(()=>assert.equal(process.env.KINANA_UI_AGENT_HOME_CASE,'missing','run with KINANA_UI_AGENT_HOME_CASE=missing'));
- it('shows unavailable agents and names the cause and the searched places',async()=>{
+ it('shows the stopped provider and offers an explicit keywords action',async()=>{
   await $('[data-testid="nav-settings"]').click();await $('.agent-settings').waitForDisplayed();const bootstrap=await browser.tauri.execute(async({core})=>core.invoke('bootstrap'));assert.equal(bootstrap.agents.length,3);assert.ok(bootstrap.agents.filter(a=>a.name!=='cursor').every(a=>!a.available));await browser.waitUntil(async()=>await $$('.agent-settings article').length===3);assert.match(await $('.agent-settings').getText(),/غير مثبت/);await browser.saveScreenshot(path.join(evidence,'error-agent-unavailable-ar.png'));
-  await $('[data-testid="nav-vault"]').click();await $('[data-testid="classify-emil-color"]').waitForEnabled();await $('[data-testid="classify-emil-color"]').click();await $('[data-testid="classify-estimate"]').waitForDisplayed();await $('[data-testid="confirm-classify"]').click();await $('[data-testid="classification-result"]').waitForDisplayed({timeout:30000});
-  const text=await $('[data-testid="classification-result"]').getText();assert.match(text,/تقريبي/);assert.doesNotMatch(text,/CLI|not installed|unavailable|Using keywords|Claude classification rejected/);
-  assert.equal(await $('[data-testid="classification-reason"]').getAttribute('data-reason'),'AGENT_EXECUTABLE_NOT_FOUND');
-  const searched=await $('[data-testid="classification-searched"]').getText();assert.match(searched,/\.local\/bin \(not present\)/);assert.match(searched,/\/usr\/bin/);
-  const detail=await browser.tauri.execute(async({core})=>core.invoke('skill_detail',{id:'emil-color'}));assert.equal(detail.detail.metadata.classification.classified_by,'keywords');assert.equal(detail.detail.metadata.proposal,undefined);
-  writeFileSync(path.join(evidence,'agent-unavailable.json'),JSON.stringify({restricted_path:true,agent_home:'missing',bootstrap,visible:text,searched,classified_by:'keywords'},null,2)+'\n');
+  const skill=()=>browser.tauri.execute(async({core})=>core.invoke('skill_detail',{id:'emil-color'}));
+  const before=(await skill()).detail.metadata;
+  await $('[data-testid="nav-vault"]').click();await $('[data-testid="skill-emil-color"] .skill-select').click();await $('[data-testid="detail-classify"]').waitForEnabled();await $('[data-testid="detail-classify"]').click();await $('[data-testid="classify-estimate"]').waitForDisplayed();await $('[data-testid="confirm-classify"]').click();
+  const stopped=$('[data-testid="classification-stopped"]');await stopped.waitForDisplayed({timeout:30000});
+  const reason=await stopped.getAttribute('data-reason');assert.equal(reason,'AGENT_AUTO_UNAVAILABLE');
+  const provider=$('[data-testid="classification-providers"] [data-agent="claude"]');await provider.waitForDisplayed();
+  const text=await stopped.getText();assert.match(await provider.getText(),/Claude/);assert.deepEqual((await skill()).detail.metadata,before);
+  await $('[data-testid="classify-with-keywords"]').click();await $('[data-testid="confirm-classify"]').waitForEnabled();await $('[data-testid="confirm-classify"]').click();
+  await $('[data-testid="classification-result"]').waitForDisplayed();
+  const detail=await skill();assert.equal(detail.detail.metadata.classification.classified_by,'keywords');assert.equal(detail.detail.metadata.proposal,undefined);
+  writeFileSync(path.join(evidence,'agent-unavailable.json'),JSON.stringify({restricted_path:true,agent_home:'missing',bootstrap,visible:text,reason,unchanged_until_explicit_keywords:true,classified_by:'keywords'},null,2)+'\n');
  });
 });

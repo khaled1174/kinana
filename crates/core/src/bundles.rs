@@ -341,6 +341,52 @@ fn parse(bytes: &[u8]) -> Result<Bundle> {
     Ok(toml::from_str(text)?)
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct MemberView {
+    #[serde(flatten)]
+    pub member: crate::BundleSkill,
+    pub audit_level: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BundleView {
+    pub name: String,
+    pub title: String,
+    pub agents: Vec<String>,
+    pub skills: Vec<MemberView>,
+    pub risky_members: usize,
+}
+
+pub fn views(vault: &Vault, bundles: Vec<Bundle>) -> Vec<BundleView> {
+    let levels = crate::activation_risk::levels(
+        vault,
+        bundles
+            .iter()
+            .flat_map(|bundle| bundle.skills.iter().map(|member| member.id.clone())),
+    );
+    bundles
+        .into_iter()
+        .map(|bundle| BundleView {
+            name: bundle.name,
+            title: bundle.title,
+            agents: bundle.agents,
+            risky_members: bundle
+                .skills
+                .iter()
+                .filter(|member| levels[&member.id] == "risky")
+                .count(),
+            skills: bundle
+                .skills
+                .into_iter()
+                .map(|member| MemberView {
+                    audit_level: levels[&member.id],
+                    member,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn bundle_directory(vault: &Vault) -> Result<PathBuf> {
     vault.config()?;
     require_directory(&vault.root.join("bundles"))

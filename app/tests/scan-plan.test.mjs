@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {planScan,scanSelection,emptyChoice} from '../src/lib/scan-plan.ts';
+import {planScan,scanSelection,emptyChoice,selectScanFolder} from '../src/lib/scan-plan.ts';
 const audit=(level='clean')=>({level,findings:[],rules_version:1,details:[]});
 const item=(path,status,name,hash,id=null,level)=>({id,name,path,status,content_hash:hash,audit:audit(level),selected:true,error:null});
 // The owner's first run in small: new, a duplicate of a new skill, a duplicate of a vault skill,
@@ -36,4 +36,16 @@ test('a chosen primary sends every version of its name; clearing a new skill dro
  assert.equal(s.added,2);assert.equal(s.locations,4);
  // A remembered primary that the new scan no longer has is not sent.
  assert.deepEqual(scanSelection(plan,{...emptyChoice(),primary:{design:'/gone'}}).primary,[]);
+});
+
+test('folder selection restores eligible new copies and includes drift without resolving a conflicting name',()=>{
+ const plan=planScan(report);
+ const before={unchecked:['/a/perf','/a/color'],primary:{},drift:[]};
+ const newCopies=selectScanFolder(plan,before,'/a');
+ assert.deepEqual(scanSelection(plan,newCopies).primary,[]);
+ assert.equal(scanSelection(plan,newCopies).risky,1);
+ const more=selectScanFolder(plan,newCopies,'/b');
+ assert.ok(scanSelection(plan,more).select.includes('/b/owned'));
+ assert.ok(!scanSelection(plan,more).select.includes('/b/design'));
+ assert.deepEqual(selectScanFolder(plan,more,'/b'),more);
 });

@@ -1,10 +1,23 @@
 {
+  "productName": "Kinana E2E",
+  "identifier": "io.github.khaled1174.kinana.e2e",
   "build": {
     "frontendDist": "../dist-e2e",
     "beforeBuildCommand": "npm run build:e2e"
   },
   "app": {
     "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Kinana E2E",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 800,
+        "minHeight": 600,
+        "create": false
+      }
+    ],
     "security": {
       "capabilities": [
         "main",
@@ -19,6 +32,13 @@
           ]
         }
       ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "macOS": {
+      "signingIdentity": "-"
     }
   }
 }

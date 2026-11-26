@@ -5,6 +5,7 @@ let html=try String(contentsOfFile:CommandLine.arguments[1],encoding:.utf8)
 let application=NSApplication.shared
 application.setActivationPolicy(.accessory)
 let configuration=WKWebViewConfiguration()
+configuration.websiteDataStore = .nonPersistent()
 let view=WKWebView(frame:NSRect(x:0,y:0,width:700,height:500),configuration:configuration)
 let window=NSWindow(contentRect:view.frame,styleMask:[.titled],backing:.buffered,defer:false)
 window.contentView=view

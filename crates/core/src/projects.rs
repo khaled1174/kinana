@@ -199,6 +199,7 @@ pub struct Preview {
     pub token: String,
     pub changes: Vec<Change>,
     pub candidates: Vec<crate::AdoptionCandidate>,
+    pub risky: Vec<crate::activation_risk::Risk>,
     pub warnings: Vec<String>,
     pub gitignore_suggestions: Vec<String>,
     pub changed: bool,
@@ -272,24 +273,37 @@ fn changes(report: &crate::ActivationReport) -> Vec<Change> {
         .collect()
 }
 pub fn preview(vault: &Vault, home: &Path, request: &Request) -> Result<Preview> {
+    build_preview(vault, home, request).map(|(preview, _)| preview)
+}
+
+fn build_preview(
+    vault: &Vault,
+    home: &Path,
+    request: &Request,
+) -> Result<(Preview, Option<activate::Plan>)> {
     status::validate_mutation_project(vault, request.project(), home)?;
     let mut plan = Preview {
         request: request.clone(),
         token: String::new(),
         changes: vec![],
         candidates: vec![],
+        risky: vec![],
         warnings: vec![],
         gitignore_suggestions: vec![],
         changed: false,
     };
+    let mut activation = None;
     let raw = match request {
         Request::Use { .. } => {
-            let r = activate::activate(vault, &use_options(request, home, true))?;
-            plan.changes = changes(&r);
+            let prepared = activate::prepare(vault, &use_options(request, home, true))?;
+            let r = &prepared.report;
+            plan.changes = changes(r);
             plan.changed = r.changed;
             plan.warnings = r.warnings.clone();
             plan.gitignore_suggestions = r.gitignore_suggestions.clone();
-            serde_json::to_value(r)
+            let raw = serde_json::to_value(r);
+            activation = Some(prepared);
+            raw
         }
         Request::Unuse { .. } => {
             let r = unuse::unuse(vault, &unuse_options(request, true))?;
@@ -315,7 +329,8 @@ pub fn preview(vault: &Vault, home: &Path, request: &Request) -> Result<Preview>
             serde_json::to_value(r)
         }
         Request::Adopt { .. } => {
-            let r = adopt::adopt(vault, &adopt_options(request, home, true))?;
+            let (r, prepared) = adopt::prepare(vault, &adopt_options(request, home, true))?;
+            activation = prepared;
             if let Some(activation) = &r.activation {
                 plan.changes = changes(activation);
                 plan.changed = activation.changed;
@@ -345,10 +360,17 @@ pub fn preview(vault: &Vault, home: &Path, request: &Request) -> Result<Preview>
         };
         observed.push((path, stamp));
     }
-    let bytes = serde_json::to_vec(&(request, raw, observed))
+    let fingerprint = if let Some(prepared) = &activation {
+        prepared.validate_staging(vault)?;
+        plan.risky = prepared.risky.clone();
+        Some(prepared.fingerprint(request)?)
+    } else {
+        None
+    };
+    let bytes = serde_json::to_vec(&(request, raw, observed, fingerprint))
         .map_err(|e| Error::new("JSON_ERROR", e.to_string()))?;
     plan.token = blake3::hash(&bytes).to_hex().to_string();
-    Ok(plan)
+    Ok((plan, activation))
 }
 /// Cancellation is accepted through read-only planning. Publication is atomic and cannot
 /// be interrupted after this boundary; the existing transaction owns rollback on failure.
@@ -383,28 +405,42 @@ pub fn apply(
     token: &str,
     control: &Control,
 ) -> Result<Preview> {
+    apply_desktop(vault, home, request, token, false, control)
+}
+
+/// The desktop invokes this after the user acknowledges the named risks.
+/// CLI activation never calls this path or accepts its preview token.
+pub fn apply_desktop(
+    vault: &Vault,
+    home: &Path,
+    request: &Request,
+    token: &str,
+    acknowledge_risk: bool,
+    control: &Control,
+) -> Result<Preview> {
     if token.is_empty() {
         return Err(Error::decision(
             "PROJECT_CONFIRMATION_REQUIRED",
             "Preview and explicitly confirm the project changes first",
         ));
     }
-    let mut plan = preview(vault, home, request)?;
+    let (mut plan, activation) = build_preview(vault, home, request)?;
     if token != plan.token {
         return Err(Error::decision(
             "PROJECT_PREVIEW_CHANGED",
             "Project or skill changed since preview; review a new preview",
         ));
     }
+    if !plan.risky.is_empty() && !acknowledge_risk {
+        return Err(crate::activation_risk::decision(&plan.risky));
+    }
     control.commit()?;
-    let warnings = match request {
-        Request::Use { .. } => {
-            activate::activate(vault, &use_options(request, home, false))?.warnings
+    let warnings = match (request, activation) {
+        (_, Some(prepared)) => activate::execute(vault, prepared, false)?.warnings,
+        (Request::Unuse { .. }, None) => {
+            unuse::unuse(vault, &unuse_options(request, false))?.warnings
         }
-        Request::Unuse { .. } => unuse::unuse(vault, &unuse_options(request, false))?.warnings,
-        Request::Adopt { .. } => adopt::adopt(vault, &adopt_options(request, home, false))?
-            .activation
-            .map_or_else(Vec::new, |r| r.warnings),
+        (_, None) => Vec::new(),
     };
     plan.warnings.extend(warnings);
     plan.warnings.sort();

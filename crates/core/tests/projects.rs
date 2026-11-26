@@ -241,3 +241,96 @@ fn project_inspection_never_follows_an_unmanaged_skill_directory_link() {
     assert!(!result[0].warnings.is_empty());
     assert_eq!(tree(&f.root), before);
 }
+
+#[test]
+fn only_the_exact_desktop_preview_can_confirm_risk() {
+    let f = Fixture::new();
+    let source = f.root.join("risky-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("SKILL.md"), "---\nname: risky\ndescription: Test risk\n---\nrm -rf \"$TEST_ROOT\"\n").unwrap();
+    import::add(&f.vault, source.to_str().unwrap(), &f.root.join("scratch"),
+        &ImportOptions { allow_risky: true, ..ImportOptions::default() }).unwrap();
+    let request = Request::Use { project: f.project.clone(), selections: vec!["risky".into()], agent: "claude".into(), mode: "copy".into(), include_secondary: vec![] };
+    let before = tree(&f.project);
+    let preview = projects::preview(&f.vault,&f.root,&request).unwrap();
+    assert_eq!(preview.risky.len(),1);
+    assert!(preview.risky[0].details.iter().any(|detail| detail.line==Some(5)));
+    assert_eq!(projects::apply(&f.vault,&f.root,&request,&preview.token,&Control::default()).unwrap_err().code,"RISKY_ACTIVATION_REQUIRES_CONFIRMATION");
+    assert_eq!(projects::apply_desktop(&f.vault,&f.root,&request,"wrong",true,&Control::default()).unwrap_err().code,"PROJECT_PREVIEW_CHANGED");
+    let cancelled=Control::default();
+    cancelled.cancel();
+    assert_eq!(projects::apply_desktop(&f.vault,&f.root,&request,&preview.token,true,&cancelled).unwrap_err().code,"PROJECT_CANCELLED");
+    assert_eq!(tree(&f.project),before);
+    projects::apply_desktop(&f.vault,&f.root,&request,&preview.token,true,&Control::default()).unwrap();
+    assert!(f.project.join(".claude/skills/risky/SKILL.md").is_file());
+    let next=projects::preview(&f.vault,&f.root,&request).unwrap();
+    assert!(next.risky.is_empty());
+    assert!(!next.changed);
+}
+
+#[cfg(unix)]
+#[test]
+fn approved_risky_links_materialize_missing_automatic_and_manual_caches() {
+    for manual in [false, true] {
+        let f = Fixture::new();
+        let source = f.root.join("risky-source");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: risky\ndescription: Test risk\n---\nrm -rf \"$TEST_ROOT\"\n",
+        )
+        .unwrap();
+        import::add(
+            &f.vault,
+            source.to_str().unwrap(),
+            &f.root.join("scratch"),
+            &ImportOptions {
+                allow_risky: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if manual {
+            let metadata = f.vault.root.join("meta/risky.toml");
+            let mut text = fs::read_to_string(&metadata).unwrap();
+            text.push_str("\n[invocation]\nmode = \"manual\"\n");
+            fs::write(&metadata, text).unwrap();
+        }
+        fs::remove_dir_all(f.vault.root.join("dist/risky")).unwrap();
+        let request = Request::Use {
+            project: f.project.clone(),
+            selections: vec!["risky".into()],
+            agent: "claude".into(),
+            mode: "link".into(),
+            include_secondary: vec![],
+        };
+        let before = tree(&f.project);
+        let preview = projects::preview(&f.vault, &f.root, &request).unwrap();
+        assert_eq!(preview.risky.len(), 1);
+        assert_eq!(tree(&f.project), before);
+        projects::apply_desktop(
+            &f.vault,
+            &f.root,
+            &request,
+            &preview.token,
+            true,
+            &Control::default(),
+        )
+        .unwrap();
+        let active = f.project.join(".claude/skills/risky");
+        let target = f.vault.root.join(if manual {
+            "dist/.manual/risky"
+        } else {
+            "dist/risky"
+        });
+        assert_eq!(fs::read_link(&active).unwrap(), target);
+        assert!(active.join("SKILL.md").is_file());
+        assert!(fs::read_dir(&f.project).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".skillsbox-activation-")
+        }));
+    }
+}

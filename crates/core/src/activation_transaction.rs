@@ -14,10 +14,10 @@ pub(crate) fn directory_identity(path: &Path) -> Result<Option<String>> {
     if !metadata.is_dir() {
         return Ok(None);
     }
-    Ok(directory_stamp(&metadata))
+    Ok(anchor_identity(&metadata))
 }
 
-fn directory_stamp(metadata: &fs::Metadata) -> Option<String> {
+pub(crate) fn anchor_identity(metadata: &fs::Metadata) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -102,6 +102,43 @@ impl Snapshot {
         }
         format!("blake3:{}", hash.finalize().to_hex())
     }
+    pub(crate) fn evidence(&self) -> String {
+        let mut hash = blake3::Hasher::new();
+        hash.update(self.ownership().as_bytes());
+        match &self.contents {
+            Contents::Tree(digest) => hash.update(digest.as_bytes()),
+            Contents::Link(path) => hash.update(path.as_os_str().as_encoded_bytes()),
+            Contents::File(bytes) => hash.update(bytes),
+            Contents::Directory => hash.update(b"directory"),
+        };
+        hash.finalize().to_hex().to_string()
+    }
+
+    pub(crate) fn matches_payload(&self, payload: &ActivationPayload) -> bool {
+        if self.digest() != Some(payload.content_hash.as_str())
+            || self.nodes.len() != payload.entries.len() + 1
+        {
+            return false;
+        }
+        payload.entries.iter().all(|entry| {
+            self.nodes.get(&entry.relative).is_some_and(|metadata| {
+                if metadata.is_file() != entry.bytes.is_some() {
+                    return false;
+                }
+                let permissions = metadata.permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.mode() & 0o7777 == entry.permissions.mode() & 0o7777
+                }
+                #[cfg(not(unix))]
+                {
+                    permissions.readonly() == entry.permissions.readonly()
+                }
+            })
+        })
+    }
+
     pub(crate) fn read(path: &Path) -> Result<Option<Self>> {
         index::validate_path(
             path.parent()
@@ -278,6 +315,15 @@ impl ActivationTransaction {
         observations: Vec<(PathBuf, Option<Snapshot>)>,
         anchors: Vec<(PathBuf, fs::Metadata)>,
     ) -> Result<Self> {
+        Self::prepare_guarded(plans, observations, anchors, &|_, _| Ok(()))
+    }
+
+    pub(crate) fn prepare_guarded(
+        plans: Vec<PlannedWrite>,
+        observations: Vec<(PathBuf, Option<Snapshot>)>,
+        anchors: Vec<(PathBuf, fs::Metadata)>,
+        check_stage: &impl Fn(&Path, &Path) -> Result<()>,
+    ) -> Result<Self> {
         let mut transaction = Self {
             writes: Vec::new(),
             observations,
@@ -355,6 +401,7 @@ impl ActivationTransaction {
                     published: false,
                 });
                 let last = transaction.writes.last_mut().expect("new stage");
+                check_stage(&last.plan.target, &last.stage)?;
                 let new = last.stage.join("new");
                 match &last.plan.data {
                     Data::Tree(payload) => {
@@ -510,6 +557,16 @@ impl ActivationTransaction {
         Ok(())
     }
 
+    pub(crate) fn verify_staging(
+        &self,
+        check_stage: &impl Fn(&Path, &Path) -> Result<()>,
+    ) -> Result<()> {
+        for write in &self.writes {
+            check_stage(&write.plan.target, &write.stage)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply(&mut self) -> Result<()> {
         self.apply_with(|_| Ok(()))
     }
@@ -607,7 +664,7 @@ impl ActivationTransaction {
         self.finished = true;
         let mut warnings = self.cleanup();
         for (path, metadata) in &self.created {
-            if let Some(identity) = directory_stamp(metadata) {
+            if let Some(identity) = anchor_identity(metadata) {
                 directories.push((path.clone(), identity));
             }
         }

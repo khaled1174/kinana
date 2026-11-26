@@ -169,6 +169,247 @@ fn simple_safe_delete(text: &str) -> bool {
         && parts.next().is_none()
 }
 
+#[derive(Clone, Copy)]
+enum Withheld {
+    Credential,
+    PrivateKey,
+}
+
+fn credential_option(normalized: &str) -> bool {
+    let mut segment_has_command = false;
+    let mut mkdir = false;
+    for token in shell_tokens(normalized) {
+        if matches!(token.as_str(), "|" | ";" | "&" | "\n" | "(" | ")") {
+            segment_has_command = false;
+            mkdir = false;
+        } else if !segment_has_command {
+            segment_has_command = true;
+            mkdir = command_name(&token) == "mkdir";
+        }
+        if mkdir
+            && token.strip_prefix('-').is_some_and(|flags| {
+                !flags.is_empty() && flags.bytes().all(|flag| matches!(flag, b'p' | b'v'))
+            })
+        {
+            continue;
+        }
+        if matches!(
+            token.split('=').next(),
+            Some("--password" | "--user" | "--proxy-user" | "--proxy-password")
+        ) || token.strip_prefix('-').is_some_and(|option| {
+            !option.starts_with('-')
+                && option
+                    .bytes()
+                    .take_while(u8::is_ascii_alphabetic)
+                    .any(|c| matches!(c, b'p' | b'u'))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+fn update_key_span(text: &str, key_label: &mut Option<String>) -> bool {
+    let mut private = key_label.is_some();
+    for (at, _) in text.match_indices("-----") {
+        let rest = &text[at + 5..];
+        let (begins, label) = if let Some(label) = rest.strip_prefix("begin ") {
+            (true, label)
+        } else if let Some(label) = rest.strip_prefix("end ") {
+            (false, label)
+        } else {
+            continue;
+        };
+        // The boundary is bounded even for malformed input full of markers.
+        let Some(end) = label.as_bytes()[..label.len().min(140)]
+            .windows(5)
+            .position(|window| window == b"-----")
+        else {
+            continue;
+        };
+        let label = &label[..end];
+        if begins
+            && (label == "private key"
+                || label == "private key block"
+                || label.ends_with(" private key")
+                || label.ends_with(" private key block"))
+        {
+            private = true;
+            if key_label.is_none() {
+                *key_label = Some(label.to_owned());
+            }
+        } else if !begins && key_label.as_deref() == Some(label) {
+            private = true;
+            *key_label = None;
+        }
+    }
+    private
+}
+
+#[derive(Clone, Copy)]
+enum HeaderTail {
+    Separator,
+    Value,
+    Quoted(u8),
+}
+
+#[derive(Default)]
+struct HeaderContext {
+    tail: Option<HeaderTail>,
+    in_comment: bool,
+}
+
+impl HeaderContext {
+    fn continue_line(&mut self, mut text: &str) {
+        loop {
+            match self.tail {
+                None => return,
+                Some(HeaderTail::Quoted(delimiter)) => {
+                    let mut escaped = false;
+                    let closing = text.bytes().position(|byte| {
+                        let closes = !escaped && byte == delimiter;
+                        escaped = !escaped && byte == b'\\';
+                        closes
+                    });
+                    let Some(closing) = closing else {
+                        return;
+                    };
+                    text = text[closing + 1..].trim_start();
+                    if let Some(after) = text.strip_prefix('+') {
+                        self.tail = Some(HeaderTail::Value);
+                        text = after;
+                        continue;
+                    }
+                    self.tail = None;
+                    return;
+                }
+                _ => {}
+            }
+            if self.in_comment {
+                let Some((_, after)) = text.split_once("*/") else {
+                    return;
+                };
+                self.in_comment = false;
+                text = after;
+                continue;
+            }
+            text = text.trim_start();
+            if let Some(rest) = text.strip_prefix("/*") {
+                self.in_comment = true;
+                text = rest;
+                continue;
+            }
+            if text.is_empty() || text.starts_with("//") {
+                return;
+            }
+            match self.tail {
+                Some(HeaderTail::Separator) => {
+                    if let Some(after) = text.strip_prefix([':', ',', '=']) {
+                        self.tail = Some(HeaderTail::Value);
+                        text = after;
+                    } else {
+                        self.tail = None;
+                    }
+                }
+                Some(HeaderTail::Value) => {
+                    self.tail = None;
+                    if let Some(delimiter @ (b'"' | b'\'' | b'\x60')) = text.bytes().next() {
+                        self.tail = Some(HeaderTail::Quoted(delimiter));
+                        text = &text[1..];
+                    }
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn withholds(&mut self, text: &str) -> bool {
+        let continued = self.tail.is_some();
+        self.continue_line(text);
+        if self.tail.is_some() {
+            return true;
+        }
+        let mut found = false;
+        for (at, key) in text.match_indices("x-api-key") {
+            found = true;
+            // A quoted object key or tuple value can be followed by a comma
+            // or colon, whitespace and comments before the value starts.
+            let quote = text.as_bytes().get(at.wrapping_sub(1)).copied();
+            let after = &text[at + key.len()..];
+            let after = match quote {
+                Some(q @ (b'"' | b'\'' | b'`')) if after.as_bytes().first() == Some(&q) => {
+                    &after[1..]
+                }
+                _ => after,
+            };
+            self.tail = Some(HeaderTail::Separator);
+            self.in_comment = false;
+            self.continue_line(after);
+            if self.tail.is_some() {
+                break;
+            }
+        }
+        continued || found
+    }
+}
+
+fn withheld_lines(lines: &[&str]) -> Vec<Option<Withheld>> {
+    let mut key_label = None;
+    let mut start = 0;
+    let mut header = HeaderContext::default();
+    let mut findings = vec![None; lines.len()];
+    for (i, line) in lines.iter().enumerate() {
+        if i + 1 != lines.len() && line.trim_end().ends_with('\\') {
+            continue;
+        }
+        let logical = normalize_text(&lines[start..=i].join("\n"));
+        let private = update_key_span(&logical, &mut key_label);
+        let credentials = header.withholds(&logical) || credential_option(&logical);
+        if private {
+            findings[start..=i].fill(Some(Withheld::PrivateKey));
+        } else if credentials {
+            findings[start..=i].fill(Some(Withheld::Credential));
+        }
+        start = i + 1;
+    }
+    findings
+}
+
+fn display_evidence(
+    text: &str,
+    rule: &str,
+    sensitive_path: bool,
+    withheld: Option<Withheld>,
+) -> (Option<String>, Vec<String>) {
+    if let Some(reason) = withheld {
+        use super::forms::{LITERAL_SECRET, PRIVATE_KEY};
+        let marker = match reason {
+            Withheld::Credential => LITERAL_SECRET,
+            Withheld::PrivateKey => PRIVATE_KEY,
+        };
+        return (
+            None,
+            if rule == "secrets" {
+                vec![marker.into()]
+            } else {
+                vec![]
+            },
+        );
+    }
+    (
+        if sensitive_path {
+            None
+        } else {
+            excerpt(text, rule)
+        },
+        if rule == "secrets" {
+            super::forms::secret_forms(text, sensitive_path)
+        } else {
+            vec![]
+        },
+    )
+}
+
 fn excerpt(text: &str, rule: &str) -> Option<String> {
     // Do not log secret-bearing source lines, URL credentials, or query values.
     if (may_hold_secret(text) && !(rule == "destructive" && simple_safe_delete(text)))
@@ -212,6 +453,8 @@ pub(super) fn collect_text(text: &str, path: &Path, findings: &mut Findings) {
     if lines.is_empty() {
         return;
     }
+    let withheld = withheld_lines(&lines);
+    let sensitive = sensitive_path(path);
     let multiline_templates = environment::supports_multiline_templates(path);
     let ignore_file = environment::is_ignore_file(path);
     let secret_view = if ignore_file {
@@ -292,6 +535,7 @@ pub(super) fn collect_text(text: &str, path: &Path, findings: &mut Findings) {
                 None
             };
             if let Some(severity) = severity {
+                let (excerpt, forms) = display_evidence(line, rule, sensitive, withheld[i]);
                 findings.record(
                     rule,
                     severity,
@@ -299,16 +543,8 @@ pub(super) fn collect_text(text: &str, path: &Path, findings: &mut Findings) {
                     finding_reason(rule, reason, line, severity),
                     Some(i + 1),
                     Some(i + 1),
-                    if sensitive_path(path) {
-                        None
-                    } else {
-                        excerpt(line, rule)
-                    },
-                    if is_secret {
-                        super::forms::secret_forms(line, sensitive_path(path))
-                    } else {
-                        Vec::new()
-                    },
+                    excerpt,
+                    forms,
                 );
             }
         }
@@ -347,6 +583,12 @@ pub(super) fn collect_text(text: &str, path: &Path, findings: &mut Findings) {
         if let Some((severity, predicate, locations)) = global {
             let (start, end) = locate(locations, predicate);
             let source = lines[start..end].join("\n");
+            let (excerpt, forms) = display_evidence(
+                &source,
+                rule,
+                sensitive,
+                withheld[start..end].iter().copied().flatten().next(),
+            );
             findings.record(
                 rule,
                 severity,
@@ -354,16 +596,8 @@ pub(super) fn collect_text(text: &str, path: &Path, findings: &mut Findings) {
                 finding_reason(rule, reason, &source, severity),
                 Some(start + 1),
                 Some(end),
-                if sensitive_path(path) {
-                    None
-                } else {
-                    excerpt(&source, rule)
-                },
-                if is_secret {
-                    super::forms::secret_forms(&source, sensitive_path(path))
-                } else {
-                    Vec::new()
-                },
+                excerpt,
+                forms,
             );
         }
     }

@@ -77,7 +77,7 @@ pub fn directory(home: &Path) -> Result<PathBuf> {
     if exists(&pending(&home))? {
         return Err(Error::decision(
             "MIGRATION_INCOMPLETE",
-            "A migration needs explicit rollback before other operations",
+            "A migration or rollback needs explicit recovery before other operations",
         ));
     }
     let old = legacy(&home);
@@ -144,12 +144,15 @@ pub fn write_guard(index_path: &Path, dry_run: bool) -> Result<WriteGuard> {
     else {
         return Ok(WriteGuard { _lease: None });
     };
-    lease(
+    let guard = lease(
         parent
             .parent()
             .ok_or_else(|| Error::new("INVALID_PATH", "State has no home"))?,
         false,
-    )
+    )?;
+    // A rollback may have finished after the preflight and before the lease.
+    require_writable(index_path)?;
+    Ok(guard)
 }
 pub(crate) fn migration_guard(home: &Path) -> Result<WriteGuard> {
     lease(home, true)

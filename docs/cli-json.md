@@ -81,7 +81,7 @@ FileDiff يعلن نوع وحجم وصلاحيات وتجزئة الطرفين،
 
 Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا قائمًا تغيّر مصدره؛ يُمسح عند المراجعة أو إنشاء نتيجة تصنيف جديدة. Source.tracking_ref وtracking_kind اختياريان، والغياب يحفظ توافق metadata القديمة دون تخمين. LockedSkill.target_root اختياري ومقيد بمسار الوكيل الثابت؛ Cursor القديم دون الحقل يبقى في .cursor/skills، والجديد يحمل .agents/skills. generation_hash اختياري لتجزئة الجيل بما يشمل صلاحيات الملفات؛ غيابه يبقي تحقق القفل القديم بالمحتوى. لا يجيز أي حقل مسارًا عامًا أو حذفًا دون الملكية. تظهر ثلاثة تفعيلات منطقية عند all في وجهتين ماديتين فقط.
 
-المخطط التالي JSON Schema Draft 2020-12. استخرج محتوى السياج بين العلامتين؛ `x-commands` يختار مخطط الأمر و`x-error` مخطط الأخطاء. `x-contract-version` نسخة هذا المستند، وليس حقلًا مضافًا إلى تقارير CLI. `x-released-in` الإصدار الذي شُحنت فيه هذه النسخة: **النسخة 8 هي عقد الإصدار 0.2.0 ومثبتة عنده** (قرار المالك، الجولة الثامنة)؛ عقد 0.3 الأول نسخة 9، وإضافة `skipped` في المرشح المحدّث نسخة 10. الاختبار يطابق `x-released-in` مع إصدار الحزمة، فرفع الإصدار يستلزم مراجعة العقد صراحة. الاختبار `crates/cli/tests/json_contract.rs` يقرأ هذا النص نفسه، يتحقق من جرد الأوامر، ويقارن المفاتيح والأنواع على مخرجات عمليات حقيقية. لا يُولّد المخطط من نماذج Rust.
+المخطط التالي JSON Schema Draft 2020-12. استخرج محتوى السياج بين العلامتين؛ `x-commands` يختار مخطط الأمر و`x-error` مخطط الأخطاء. `x-contract-version` نسخة هذا المستند، وليس حقلًا مضافًا إلى تقارير CLI. `x-released-in` الإصدار الذي شُحنت فيه هذه النسخة: **النسخة 8 هي عقد الإصدار 0.2.0 ومثبتة عنده** (قرار المالك، الجولة الثامنة)؛ عقد 0.3 الأول نسخة 9، وإضافة `skipped` في المرشح المحدّث نسخة 10. يبقى `x-current-release` مثبتًا عند آخر إصدار منشور. يربط الاختبار `x-development-release` بإصدار حزمة المرشح. الاختبار `crates/cli/tests/json_contract.rs` يقرأ هذا النص نفسه، يتحقق من جرد الأوامر، ويقارن المفاتيح والأنواع على مخرجات عمليات حقيقية. لا يُولّد المخطط من نماذج Rust.
 
 <!-- cli-json-contract:start -->
 ```json
@@ -90,6 +90,8 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
   "x-contract-version": 8,
   "x-released-in": "0.2.0",
   "x-current-release": { "contract": 11, "released-in": "0.3.0" },
+  "x-development-contract": 12,
+  "x-development-release": "0.4.0",
   "x-commands": {
     "init": {
       "$ref": "#/$defs/Init"
@@ -152,7 +154,7 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
       "$ref": "#/$defs/BundleSave"
     },
     "bundle show": {
-      "$ref": "#/$defs/Bundle"
+      "$ref": "#/$defs/BundleView"
     },
     "doctor": {
       "$ref": "#/$defs/Doctor"
@@ -190,7 +192,7 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
     "bundle list": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/Bundle"
+        "$ref": "#/$defs/BundleView"
       }
     },
     "search": {
@@ -1662,6 +1664,126 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
       ],
       "additionalProperties": false
     },
+    "ActivationRisk": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "skill",
+            "primary",
+            "secondary"
+          ]
+        },
+        "audit_level": {
+          "type": "string",
+          "enum": [
+            "risky"
+          ]
+        },
+        "rules_version": {
+          "anyOf": [{ "type": "integer" }, { "type": "null" }]
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AuditFinding"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "audit_level",
+        "rules_version",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "ActivationDecision": {
+      "type": "object",
+      "properties": {
+        "requires_confirmation": {
+          "type": "boolean"
+        },
+        "risky": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActivationRisk"
+          }
+        }
+      },
+      "required": [
+        "requires_confirmation",
+        "risky"
+      ],
+      "additionalProperties": false
+    },
+    "BundleMemberView": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "audit_level": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "review",
+            "risky"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "audit_level"
+      ],
+      "additionalProperties": false
+    },
+    "BundleView": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BundleMemberView"
+          }
+        },
+        "risky_members": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "agents",
+        "skills",
+        "risky_members"
+      ],
+      "additionalProperties": false
+    },
     "BundleSave": {
       "type": "object",
       "properties": {
@@ -1942,6 +2064,9 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           "items": {
             "type": "string"
           }
+        },
+        "preview_token": {
+          "type": "string"
         }
       },
       "required": [
@@ -2498,6 +2623,9 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         },
         "message": {
           "type": "string"
+        },
+        "activation_preview": {
+          "$ref": "#/$defs/ActivationDecision"
         }
       },
       "required": [
@@ -2646,12 +2774,16 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         },
         "match_count": {
           "type": "integer"
+        },
+        "risky_members": {
+          "type": "integer"
         }
       },
       "required": [
         "bundle",
         "matched_categories",
-        "match_count"
+        "match_count",
+        "risky_members"
       ],
       "additionalProperties": false
     },
@@ -2782,6 +2914,14 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           "items": {
             "type": "string"
           }
+        },
+        "audit_level": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "review",
+            "risky"
+          ]
         }
       },
       "required": [
@@ -2792,7 +2932,8 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         "description",
         "category",
         "stack",
-        "stage"
+        "stage",
+        "audit_level"
       ],
       "additionalProperties": false
     },
@@ -2804,11 +2945,20 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
         },
         "role": {
           "type": "string"
+        },
+        "audit_level": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "review",
+            "risky"
+          ]
         }
       },
       "required": [
         "id",
-        "role"
+        "role",
+        "audit_level"
       ],
       "additionalProperties": false
     },
@@ -2829,11 +2979,15 @@ Metadata.proposal_source_changed اختياري، ويعلّم اقتراحًا 
           "items": {
             "$ref": "#/$defs/BriefBundleSkill"
           }
+        },
+        "risky_members": {
+          "type": "integer"
         }
       },
       "required": [
         "name",
-        "members"
+        "members",
+        "risky_members"
       ],
       "additionalProperties": false
     },
@@ -3816,7 +3970,7 @@ cargo test --locked -p kinana --test json_contract
 - **Pi: المزوّدون والموديلات، والموديل اختياري** ([01](0.3-r5-proposals/01-pi-models-json.md)):
   - **`pi_confirmation`** (في `classify --json`): حقل مطلوب جديد `model_default: boolean`. `model` هو الموديل الذي سيُمرَّر إلى Pi دائمًا (المختار، أو افتراضي Pi للمزوّد حين يكون `model_default` صحيحًا)، ولا يكون فارغًا أبدًا. بادئة الرمز `pc3.` بدل `pc2.`؛ رمز `pc2.` القديم يُرفض بـ`PI_CONFIRMATION_CHANGED` (رمز2، بلا كتابة).
   - **رسالة التوقف `PI_CONFIRMATION_REQUIRED`** تذكر «(Pi's default for this provider)» بعد الموديل الافتراضي. الرمز والحقول الأخرى كما هي.
-  - **`INVALID_PI_SETTINGS`:** لم يعد الموديل الفارغ وحده سببًا له. يبقى سببًا للمزوّد الفارغ مع التفعيل، وللموديل الفارغ لمزوّد بلا افتراضي في Pi 1.5.2، وللصيغ غير المقبولة. صار `@` مقبولًا في الموديل.
+  - **`INVALID_PI_SETTINGS`:** لم يعد الموديل الفارغ وحده سببًا له. يبقى سببًا للمزوّد الفارغ مع التفعيل، وللموديل الفارغ لمزوّد بلا افتراضي في إصدار Pi المتحقق منه، وللصيغ غير المقبولة. صار `@` مقبولًا في الموديل.
   - **`box.toml` `[classification_pi]`:** `model` قد يكون فارغًا أو غائبًا مع `enabled = true`.
   - **سطح المكتب فقط (لا أمر CLI):** أمر جسر `pi_models` يعيد `{version, providers: [{id, models: [{id, context, max_out, thinking, images}], default_model: string|null, default_listed: boolean}], skipped_rows}`، أو خطأً برمز ثابت: رموز البوابة الحالية (`AGENT_EXECUTABLE_NOT_FOUND` و`AGENT_PACKAGE_UNVERIFIED` و`AGENT_VERSION_UNVERIFIED` و`PI_APPEND_SYSTEM_FILE` وغيرها) و`AGENT_TIMEOUT` و`AGENT_EXIT_FAILED` والجديد `PI_MODELS_UNREADABLE`.
 
@@ -3865,3 +4019,50 @@ cargo test --locked -p kinana --test json_contract
 - **`reason_code` للحذف المتكرر القسري:** `AUDIT_RECURSIVE_DELETE_STRONG`، ضمن القاعدة `destructive`.
 - `line` و`end_line` غائبا المعنى (null) لسبب لا يقع على سطر، و`excerpt` تكون null حين قد تحتوي معلومات حساسة.
 - القواعد في SPEC §8 (سطر قاعدة الأسرار)، ونص العقد من [المقترح](0.3-r3-proposals/05-audit-json.md).
+
+### A1 — سياسة المقتطفات (معتمدة 2026-11-26)
+
+إصدار قواعد الفحص 5. يحتفظ التدقيق السابق بإصداره ومستواه وأسبابه ومواضعه وصيغه عند القراءة، وتعود مقتطفاته كلها بقيمة JSON null حتى إعادة فحص صريحة. التدقيق الحالي يُرجع null إذا حُجب المقتطف. يسري ذلك على كائن Audit المباشر والمتداخل في التفاصيل والمعاينات. شكل الحقول ورقم العقد ثابتان.
+
+### R03 — استئناف التراجع (معتمد 2026-11-26)
+
+يبقى تقرير الترحيل في الإصدار 1 وشكل JSON ثابتًا. يميّز حقل الحالة الموجود بين restore وrestored في معاينة التراجع. يعيد المؤشر الموجود MIGRATION_INCOMPLETE للأوامر العادية. يصبح رمز المعاينة السابق غير صالح بعد تقدم الاستعادة. مؤشرات السجل داخلية.
+
+### R20 — بيانات مصدر الإصدار (معتمدة 2026-11-26)
+
+تضيف بيانات أدوات الإصدار source_provenance، وفيها revision وtree_sha256 لجرد المسارات وأنماط Git وتجزئات الملفات، وlocks لتجزئتي Cargo.lock وapp/package-lock.json. تتحقق كل مرحلة من البيان السابق وتحمل المصدر إلى بيانها. يبقى source_tree_sha256 في بيان تغليف DMG تجزئة شجرة التطبيق كما كان. عقد أوامر كنانة ثابت.
+
+
+### A2 — عقد التطوير 12 (معتمد 2026-11-26)
+
+يعيد use أو adopt أو معاينتهما رمز الخروج 2 عند طلب تفعيل خطر يتطلب تغييرًا. error.code هو RISKY_ACTIVATION_REQUIRES_CONFIRMATION، ويطلب من المستخدم فتح كنانة. قد يحوي error.activation_preview علامة requires_confirmation وأعضاء risky مع سبب وموضع مختصرين. لا يحوي رمز تأكيد أو مقتطفًا أو مسار نسخة مجهزة. يظل الرفض قائمًا لأي رمز وارد. تفعيل الخطر في الواجهة وحدها بعد إقرار الأسباب ورمز مطابق للخطة.
+
+معاينة use العادية تعيد preview_token. إعادة استعمال الرمز اختيارية للحالة العادية، والرمز المقدم إذا تغيرت الخطة يرفض بـUSE_PREVIEW_CHANGED ورمز خروج 2. لا يتغير شكل قفل 0.3 أو ملفات الحزم. list --brief يحمل audit_level للمهارة ولكل عضو معروض، وrisky_members للحزمة حتى إن اختُصرت. bundle list وbundle show يعرضان العلامة لكل عضو والعدد، وsuggest يعرض العدد. يظل عقد الإصدار المنشور 11، ويحدد x-development-contract عقد 0.4 قيد التطوير.
+
+### F1 — اعتماد وصف الاستيراد (0.4)
+
+أوامر CLI وخروج JSON ثابتان. تضيف معاينة الاستيراد الخاصة بالجسر وصف المصدر، وتنقل مرحلة تأكيد سطح المكتب أوصافًا اختيارية مربوطة بمسارات النسخ المختارة وتجزئات المعاينة.
+
+### F2 — اختيار وكيل الدفعة بعد المسح (0.4)
+
+عقد CLI ثابت. يستعمل سطح المكتب اختيار الوكيل في طلبَي المعاينة والتشغيل الحاليين.
+
+### F3-F4 — تأكيد التراجع عن الاعتماد التلقائي (0.4)
+
+عقد CLI والجسر ثابتان. تستدعي الواجهة undo_auto_approval بعد التأكيد، مستخدمة معرّف commit نفسه.
+
+### F5 — حفظ آخر سبب لتخطي مهارة (0.4)
+
+يضيف جسر التفاصيل skipped_classification اختياريًا، بحقول agent وreason_code وskipped_at. تبقى أوامر CLI وشكل ملفات Git للمخزن ثابتة.
+
+### F6 — توضيح حالة المشروع الخالي من التفعيلات (0.4)
+
+عقد CLI والجسر ثابتان. التغيير يخص عرض حالة no_lock وقائمة التفعيلات الفارغة.
+
+### F7-F8 — اختيار نسخ المجلد وترقيم نتائج المسح (0.4)
+
+عقد CLI والجسر ثابتان. تتحول اختيارات المجلد إلى مسارات الاختيار والرئيسية الحالية.
+
+### C15 — اختيار سجل Pi بالإصدار (0.4)
+
+يعرض `pi_models.version` إصدار الحزمة الذي شغّل القائمة. يُقرأ افتراضي المزوّد من سجل الإصدار. تغيب `pi_confirmation` عندما يتعذر التحقق من الحزمة والموديل. يبقى الرمز `pc3.` ويرتبط بالإصدار والموديل المحسوم وطريقة اختياره. يُرفض الرمز المتقادم بـ`PI_CONFIRMATION_CHANGED` قبل بدء الوكلاء. إذا تبدّلت الحزمة بعد حسم الموديل، يرفض Pi إرسال النص ويظهر الرمز نفسه في أسباب توقف المزوّد.

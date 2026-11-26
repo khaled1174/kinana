@@ -4,8 +4,8 @@ use crate::activation_transaction::{
 };
 use crate::{
     ActivateOptions, ActivationItem, ActivationReport, Error, LockedSkill, ProjectLock,
-    ProjectRegistration, Result, agents, build, bundles, edit, frontmatter, index, lockfile,
-    project_registry, vault::Vault,
+    ProjectRegistration, Result, activation_risk, agents, build, bundles, edit, frontmatter, index,
+    lockfile, project_registry, vault::Vault,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,40 +19,111 @@ struct ManualOwnership {
     generated: BTreeMap<String, String>,
 }
 
-struct Plan {
-    report: ActivationReport,
+pub(crate) struct Plan {
+    pub(crate) report: ActivationReport,
+    pub(crate) risky: Vec<activation_risk::Risk>,
+    risky_stages: Vec<PathBuf>,
+    risky_project_targets: BTreeSet<PathBuf>,
+    home: PathBuf,
     writes: Vec<PlannedWrite>,
     observations: Vec<(PathBuf, Option<Snapshot>)>,
     anchors: Vec<(PathBuf, fs::Metadata)>,
 }
 
 pub fn activate(vault: &Vault, options: &ActivateOptions) -> Result<ActivationReport> {
-    execute(
-        vault,
-        plan(vault, options, &BTreeMap::new(), None)?,
-        options.dry_run,
-    )
+    activate_cli(vault, options, None, false)
 }
 
-pub(crate) fn adopt_validated(
+pub fn activate_cli(
+    vault: &Vault,
+    options: &ActivateOptions,
+    confirmation: Option<&str>,
+    preview_token: bool,
+) -> Result<ActivationReport> {
+    let mut plan = prepare(vault, options)?;
+    if !plan.risky.is_empty() {
+        return Err(activation_risk::decision(&plan.risky));
+    }
+    if confirmation.is_some() || preview_token {
+        let token = plan.fingerprint(&(
+            &options.selections,
+            &options.project,
+            &options.home,
+            &options.agent,
+            &options.mode,
+            &options.include_secondary,
+        ))?;
+        if confirmation.is_some_and(|provided| provided != token) {
+            return Err(Error::decision(
+                "USE_PREVIEW_CHANGED",
+                "Review a new activation preview",
+            ));
+        }
+        if preview_token {
+            plan.report.preview_token = Some(token);
+        }
+    }
+    execute(vault, plan, options.dry_run)
+}
+
+pub(crate) fn prepare(vault: &Vault, options: &ActivateOptions) -> Result<Plan> {
+    plan(vault, options, &BTreeMap::new(), None)
+}
+
+fn check_staging(vault: &Vault, project: &Path, home: &Path, stages: &[PathBuf]) -> Result<()> {
+    for source in stages {
+        activation_risk::require_private_stage(vault, source, Some(home), Some(project))?;
+    }
+    Ok(())
+}
+
+impl Plan {
+    pub(crate) fn validate_staging(&self, vault: &Vault) -> Result<()> {
+        check_staging(vault, &self.report.project, &self.home, &self.risky_stages)
+    }
+
+    pub(crate) fn fingerprint(&self, selection: &impl Serialize) -> Result<String> {
+        let observed = self
+            .observations
+            .iter()
+            .map(|(path, snapshot)| (path, snapshot.as_ref().map(Snapshot::evidence)))
+            .collect::<Vec<_>>();
+        let writes = self
+            .writes
+            .iter()
+            .map(|write| (&write.target, write.before.as_ref().map(Snapshot::evidence)))
+            .collect::<Vec<_>>();
+        let anchors = self
+            .anchors
+            .iter()
+            .map(|(path, meta)| (path, transaction::anchor_identity(meta)))
+            .collect::<Vec<_>>();
+        let mut report = self.report.clone();
+        report.dry_run = true;
+        let bytes =
+            serde_json::to_vec(&(selection, report, &self.risky, observed, writes, anchors))
+                .map_err(|error| Error::new("JSON_ERROR", error.to_string()))?;
+        Ok(blake3::hash(&bytes).to_hex().to_string())
+    }
+}
+
+pub(crate) fn prepare_adopt(
     vault: &Vault,
     options: &ActivateOptions,
     targets: &BTreeMap<PathBuf, Snapshot>,
     pairs: &BTreeSet<(String, String)>,
-) -> Result<ActivationReport> {
-    execute(
-        vault,
-        plan(vault, options, targets, Some(pairs))?,
-        options.dry_run,
-    )
+) -> Result<Plan> {
+    plan(vault, options, targets, Some(pairs))
 }
 
-fn execute(vault: &Vault, mut plan: Plan, dry_run: bool) -> Result<ActivationReport> {
+pub(crate) fn execute(vault: &Vault, mut plan: Plan, dry_run: bool) -> Result<ActivationReport> {
+    plan.validate_staging(vault)?;
     transaction::preflight(&plan.writes, &plan.observations, &plan.anchors)?;
     if dry_run || !plan.report.changed {
         return Ok(plan.report);
     }
     let _state_guard = crate::state::write_guard(&vault.index_path, false)?;
+    plan.report.dry_run = false;
     // Hold the cache transaction until every filesystem publication is verified.
     let mut connection = plan
         .report
@@ -68,10 +139,32 @@ fn execute(vault: &Vault, mut plan: Plan, dry_run: bool) -> Result<ActivationRep
     if let Some(database) = &database {
         index::write_project_cache(database, &plan.report.project, &plan.report.lock)?;
     }
-    let mut filesystem =
-        ActivationTransaction::prepare(plan.writes, plan.observations, plan.anchors)?;
+    let check_private_stage = |target: &Path, stage: &Path| {
+        if plan.risky_project_targets.contains(target)
+            || plan.risky_stages.iter().any(|path| path == target)
+        {
+            activation_risk::require_private_stage(
+                vault,
+                stage,
+                Some(&plan.home),
+                Some(&plan.report.project),
+            )?;
+        }
+        Ok(())
+    };
+    let mut filesystem = ActivationTransaction::prepare_guarded(
+        plan.writes,
+        plan.observations,
+        plan.anchors,
+        &check_private_stage,
+    )?;
     if let Some(bytes) = filesystem.staged_file(&lockfile::write_path(&plan.report.project)?) {
         plan.report.lock = lockfile::parse(bytes)?;
+    }
+    if let Err(error) = check_staging(vault, &plan.report.project, &plan.home, &plan.risky_stages)
+        .and_then(|()| filesystem.verify_staging(&check_private_stage))
+    {
+        return Err(filesystem.abort(error));
     }
     if let Err(error) = filesystem.apply() {
         return Err(filesystem.abort(error));
@@ -333,6 +426,9 @@ fn plan(
     let mut manual_done = BTreeSet::new();
     let mut items = Vec::new();
     let mut selected_names = BTreeSet::new();
+    let mut risky = Vec::new();
+    let mut risky_stages = Vec::new();
+    let mut risky_project_targets = BTreeSet::new();
     let mut suggestions = Vec::new();
     let mut warnings = Vec::new();
     for id in &selected {
@@ -392,14 +488,43 @@ fn plan(
                     data: Data::Tree(payload.clone()),
                 });
             } else {
+                if !before
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.matches_payload(&payload))
+                {
+                    return Err(conflict("Prepared manual cache changed during planning"));
+                }
                 observations.push((source.clone(), before));
             }
             manual_manifest
                 .generated
                 .insert(id.clone(), payload.content_hash.clone());
         } else if invocation == "auto" && !cache.changed.contains_key(id) {
-            observations.push((source.clone(), Snapshot::read(&source)?));
+            let observed = Snapshot::read(&source)?;
+            if !observed
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.matches_payload(&payload))
+            {
+                return Err(conflict(
+                    "Prepared activation cache changed during planning",
+                ));
+            }
+            observations.push((source.clone(), observed));
         }
+        let stored = metadata
+            .get("audit")
+            .cloned()
+            .and_then(|value| value.try_into::<crate::Audit>().ok())
+            .unwrap_or_default();
+        let role = if secondary.contains(id) {
+            "secondary"
+        } else if bundle_agents.is_some() {
+            "primary"
+        } else {
+            "skill"
+        };
+        let risk = activation_risk::for_payload(id, role, &stored, &payload);
+        let mut needs_risk_decision = false;
         let name = frontmatter::read_skill(&root.join("skills").join(id).join("SKILL.md"))?.name;
         if name.chars().any(crate::names::hidden_or_reordering) {
             return Err(Error::decision(
@@ -559,13 +684,22 @@ fn plan(
             if unchanged {
                 desired.ownership = before.as_ref().map(Snapshot::ownership);
             }
+            needs_risk_decision |= !unchanged
+                || writes.iter().any(|write| write.target == source)
+                || !lock.active.iter().any(|active| active == &desired);
             let already_planned = writes.iter().any(|write| write.target == target);
             if unchanged {
                 observations.push((target.clone(), before));
             } else if !already_planned {
+                let stage_parent = if risk.is_some() {
+                    risky_project_targets.insert(target.clone());
+                    project.clone()
+                } else {
+                    parent.clone()
+                };
                 writes.push(PlannedWrite {
                     target: target.clone(),
-                    stage_parent: parent.clone(),
+                    stage_parent,
                     before,
                     data: if options.mode == "link" {
                         Data::Link(source.clone())
@@ -590,6 +724,20 @@ fn plan(
             });
             if options.mode == "link" {
                 suggestions.push(format!("/{}/{}", prefix, escape_gitignore(&name)));
+            }
+        }
+        if invocation == "manual"
+            && cache.changed.contains_key(id)
+            && activation_risk::for_payload(id, role, &stored, base).is_some()
+        {
+            risky_stages.push(dist.join(id));
+        }
+        if let Some(risk) = risk {
+            if writes.iter().any(|write| write.target == source) {
+                risky_stages.push(source);
+            }
+            if needs_risk_decision {
+                risky.push(risk);
             }
         }
     }
@@ -689,7 +837,12 @@ fn plan(
             lock,
             gitignore_suggestions: suggestions,
             warnings,
+            preview_token: None,
         },
+        risky,
+        risky_stages,
+        risky_project_targets,
+        home,
         writes,
         observations,
         anchors: anchors.into_iter().collect(),

@@ -23,7 +23,12 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
 import tempfile
+
+# Import the local helper without writing into the source checkout.
+sys.dont_write_bytecode = True
+from release_source import manifest_source, verify_recorded_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = 'kinana-notary'
@@ -106,6 +111,7 @@ def reuse(name, path, job):
 
 if args.mode == 'app':
     built = json.loads(args.artifact.read_text())
+    provenance = verify_recorded_snapshot(built)
     signed_app = Path(built['app'])
     signed_zip = Path(next(iter(built['archives'])))
     if files(signed_app) != built['bundle_sha256']:
@@ -143,6 +149,7 @@ if args.mode == 'app':
     run('cli-help', [cli, '--version'])
     manifest = {
         'created_at': now(), 'source_build_revision': built['revision'], 'profile': PROFILE,
+        'source_provenance': provenance, 'frozen_source': built['frozen_source'],
         'notary_jobs': {'app': job}, 'app': str(app), 'executable': str(app / 'Contents/MacOS/kinana-desktop'),
         'cli': {'bundled': str(cli), 'sha256': sha(cli), 'same_as_signed_build': sha(cli) == built['cli']['sha256']},
         'stapled': True, 'bundle_sha256': stapled, 'archives': {str(archive): sha(archive)},
@@ -154,6 +161,8 @@ if args.mode == 'app':
     print(json.dumps({k: v for k, v in manifest.items() if k != 'bundle_sha256'}, indent=2), flush=True)
 else:
     package = json.loads(args.package.read_text())
+    previous = json.loads(Path(package['notarized_app_manifest']).read_text())
+    provenance = manifest_source(package, 'source_build_revision', manifest_source(previous, 'source_build_revision'))
     dmg = Path(package['dmg'])
     if sha(dmg) != package['signed_dmg_sha256_before_notarization']:
         raise SystemExit('The signed DMG differs from its packaging manifest')
@@ -178,6 +187,7 @@ else:
     if not same or not link_ok:
         raise SystemExit(f'Mounted DMG check failed: app identical={same}, Applications link={link_ok}')
     result = {'checked_at': now(), 'dmg': str(dmg), 'notary_job': job, 'stapled_dmg_sha256': sha(dmg),
-              'mounted_app_identical_to_notarized': same, 'applications_link': link_ok, 'published': False}
+              'mounted_app_identical_to_notarized': same, 'applications_link': link_ok,
+              'source_provenance': provenance, 'published': False}
     (evidence / 'verification.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result, indent=2), flush=True)

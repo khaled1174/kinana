@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod activation_risk;
 mod activation_transaction;
 pub mod adopt;
 pub mod agent_runner;
@@ -7,6 +8,7 @@ pub mod audit;
 pub mod build;
 pub mod bundles;
 pub mod catalog;
+pub mod classification_history;
 pub mod classify;
 pub mod diagnostics;
 pub mod dimensions;

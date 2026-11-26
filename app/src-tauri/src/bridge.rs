@@ -176,7 +176,21 @@ pub async fn skill_detail(
     id: String,
 ) -> Result<serde_json::Value, Error> {
     let v = state.vault()?;
-    work(move || core::diagnostics::detail(&core::catalog::detail(&v, &id)?)).await
+    work(move || {
+        let mut detail = core::diagnostics::detail(&core::catalog::detail(&v, &id)?)?;
+        match core::classification_history::skipped(&v, &id) {
+            Ok(Some(skipped)) => {
+                detail["skipped_classification"] = serde_json::to_value(skipped)
+                    .map_err(|error| Error::new("JSON_ERROR", error.to_string()))?;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                detail["classification_history_unavailable"] = true.into();
+            }
+        }
+        Ok(detail)
+    })
+    .await
 }
 #[tauri::command]
 pub async fn pin_skill(
@@ -308,11 +322,12 @@ fn classify_options(
 /// Codex was refused or `auto` stopped (only Claude or keywords). The window
 /// sends back the agent its preview used; a saved agent that changed since
 /// is refused instead of running another behaviour (0.3).
-fn chosen_agent(v: &Vault, choice: Option<String>) -> Result<String, Error> {
+fn chosen_agent(v: &Vault, choice: Option<String>, batch_choice: bool) -> Result<String, Error> {
     let saved = v.config()?.classification_agent;
     match choice.as_deref() {
         None => Ok(saved),
         Some(agent @ ("claude" | "keywords")) => Ok(agent.to_owned()),
+        Some(agent @ ("auto" | "pi")) if batch_choice => Ok(agent.to_owned()),
         Some(agent) if agent == saved => Ok(saved),
         Some(_) => Err(Error::decision(
             "CLASSIFY_AGENT_CHANGED",
@@ -328,9 +343,10 @@ pub async fn preview_classify(
     pending: Option<bool>,
     ids: Option<Vec<String>>,
     agent: Option<String>,
+    batch_choice: Option<bool>,
 ) -> Result<serde_json::Value, Error> {
     let v = state.vault()?;
-    let agent = chosen_agent(&v, agent)?;
+    let agent = chosen_agent(&v, agent, batch_choice.unwrap_or(false))?;
     work(move || {
         let mut value = core::diagnostics::classification(&core::classify::classify(
             &v,
@@ -373,6 +389,7 @@ pub fn start_classify(
     confirmed: bool,
     ids: Option<Vec<String>>,
     agent: Option<String>,
+    batch_choice: Option<bool>,
     pi_confirmation: Option<String>,
 ) -> Result<(), Error> {
     let mut current = state.classification.lock().map_err(|_| busy())?;
@@ -380,7 +397,7 @@ pub fn start_classify(
         return Err(busy());
     }
     let v = state.vault()?;
-    let agent = chosen_agent(&v, agent)?;
+    let agent = chosen_agent(&v, agent, batch_choice.unwrap_or(false))?;
     let job = Arc::new(ClassificationJob {
         control: Default::default(),
         state: Mutex::new(Default::default()),
@@ -459,9 +476,11 @@ pub async fn reveal_skill_folder(
     .await
 }
 #[tauri::command]
-pub async fn vault_bundles(state: tauri::State<'_, Desktop>) -> Result<Vec<core::Bundle>, Error> {
+pub async fn vault_bundles(
+    state: tauri::State<'_, Desktop>,
+) -> Result<Vec<core::bundles::BundleView>, Error> {
     let v = state.vault()?;
-    work(move || core::bundles::list(&v)).await
+    work(move || Ok(core::bundles::views(&v, core::bundles::list(&v)?))).await
 }
 #[tauri::command]
 pub async fn vault_groups(state: tauri::State<'_, Desktop>) -> Result<serde_json::Value, Error> {
@@ -497,6 +516,9 @@ pub struct ImportSelection {
     /// Scan only: the chosen version for each name found with different contents.
     #[serde(default)]
     pub primary: Vec<String>,
+    #[serde(default)]
+    pub descriptions: std::collections::BTreeMap<PathBuf, String>,
+    pub approval_token: Option<String>,
 }
 impl ImportSelection {
     fn verify_preview(&self, report: Option<&core::ImportReport>) -> Result<(), Error> {
@@ -524,6 +546,16 @@ impl ImportSelection {
         Ok(())
     }
 
+    fn approval_token(&self) -> Result<String, Error> {
+        core::import::scan_selection_token(
+            &self.reviewed,
+            &self.select,
+            &self.primary,
+            self.allow_risky,
+            &self.descriptions,
+        )
+    }
+
     fn options(&self, dry_run: bool) -> core::ImportOptions {
         core::ImportOptions {
             dry_run,
@@ -532,6 +564,7 @@ impl ImportSelection {
             allow_risky: self.allow_risky,
             id_suffix: self.suffix.clone(),
             primary: self.primary.clone(),
+            descriptions: self.descriptions.clone(),
             ..Default::default()
         }
     }
@@ -788,6 +821,7 @@ pub fn start_project(
     request: core::projects::Request,
     token: String,
     confirmed: bool,
+    acknowledge_risk: Option<bool>,
 ) -> Result<(), Error> {
     let mut current = state.project.lock().map_err(|_| busy())?;
     if current.is_some() {
@@ -801,11 +835,12 @@ pub fn start_project(
     });
     *current = Some(job.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let result = core::projects::apply(
+        let result = core::projects::apply_desktop(
             &v,
             &h,
             &request,
             if confirmed { &token } else { "" },
+            acknowledge_risk == Some(true),
             &job.control,
         );
         let mut state = job.result.lock().unwrap_or_else(|e| e.into_inner());
@@ -1102,6 +1137,23 @@ pub fn start_scan(
     Ok(())
 }
 #[tauri::command]
+pub fn preview_scan_selection(
+    state: tauri::State<'_, Desktop>,
+    selection: ImportSelection,
+) -> Result<String, Error> {
+    let current = state.scan.lock().map_err(|_| busy())?;
+    let job = current
+        .as_ref()
+        .ok_or_else(|| Error::new("NO_SCAN", "No scan preview"))?;
+    let result = job.result.lock().map_err(|_| busy())?;
+    if !result.done || result.imported {
+        return Err(busy());
+    }
+    selection.verify_preview(result.report.as_ref())?;
+    selection.approval_token()
+}
+
+#[tauri::command]
 pub fn commit_scan(
     state: tauri::State<'_, Desktop>,
     selection: ImportSelection,
@@ -1125,6 +1177,14 @@ pub fn commit_scan(
             return Err(busy());
         }
         selection.verify_preview(result.report.as_ref())?;
+        if !selection.descriptions.is_empty()
+            && selection.approval_token.as_ref() != Some(&selection.approval_token()?)
+        {
+            return Err(Error::decision(
+                "IMPORT_PREVIEW_CHANGED",
+                "Review the descriptions again before confirming.",
+            ));
+        }
         result.done = false;
         result.error = None;
         // A cancelled or failed import leaves the preview for another try.

@@ -144,6 +144,7 @@ fn every_skill_carries_the_fixed_fields_in_list_order_with_when_not_from_metadat
                     "description": "Build accessible forms",
                     "category": "web-frontend",
                     "stack": ["react", "next"],
+                    "audit_level": "risky",
                     "stage": ["build"],
                 },
                 {
@@ -154,6 +155,7 @@ fn every_skill_carries_the_fixed_fields_in_list_order_with_when_not_from_metadat
                     "description": "Review REST API contracts",
                     "category": "backend-api",
                     "stack": ["node"],
+                    "audit_level": "risky",
                     "stage": ["design", "review"],
                 },
                 {
@@ -165,6 +167,7 @@ fn every_skill_carries_the_fixed_fields_in_list_order_with_when_not_from_metadat
                     "description": "Imported and never classified",
                     "category": "other",
                     "stack": [],
+                    "audit_level": "risky",
                     "stage": [],
                 },
             ],
@@ -358,10 +361,10 @@ fn every_bundle_is_listed_whole_whatever_the_skill_filters_are() {
     );
     f.bundle("empty", "Nothing yet", &[]);
     let expected = serde_json::json!([
-        {"name": "empty", "members": 0, "title": "Nothing yet", "skills": []},
-        {"name": "web-kit", "members": 2, "title": "Web kit", "skills": [
-            {"id": "form-kit", "role": "primary"},
-            {"id": "api-review", "role": "secondary"},
+        {"name": "empty", "members": 0, "risky_members": 0, "title": "Nothing yet", "skills": []},
+        {"name": "web-kit", "members": 2, "risky_members": 2, "title": "Web kit", "skills": [
+            {"id": "form-kit", "role": "primary", "audit_level": "risky"},
+            {"id": "api-review", "role": "secondary", "audit_level": "risky"},
         ]},
     ]);
     for filter in [

@@ -1,8 +1,8 @@
-// Audit rules version 3 (owner decision 2026-11-20): stored audits made by
+// Audit rules versions: stored audits made by
 // older rules are never rewritten silently; the app shows them as older and
 // offers a preview whose confirmation re-audits every skill in one commit.
 // Must equal `RULES_VERSION` in crates/core/src/audit.rs (checked by a test).
-export const AUDIT_RULES_VERSION = 4;
+export const AUDIT_RULES_VERSION = 5;
 
 export type LevelChange = { id: string; from: string; to: string };
 export type RulesUpgrade = {

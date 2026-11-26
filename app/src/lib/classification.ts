@@ -37,3 +37,9 @@ export function itemReason(item: ReportItem, outcome: Outcome): string | undefin
 export function showProviderDetails(providers: ProviderStatus[], stopped: boolean): boolean {
   return providers.length > 1 || (stopped && providers.some(provider => provider.status === "failed" && !!provider.reason_code));
 }
+
+export function unreviewedPiVersion(message: string, providers: ProviderStatus[]) {
+  if (!providers.some(provider => provider.agent === "pi" && provider.reason_code === "AGENT_VERSION_UNVERIFIED")) return;
+  const versions = message.match(/\bPi (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?) is pending review; accepted versions: (\d+\.\d+\.\d+(?:, \d+\.\d+\.\d+)*)\./);
+  if (versions) return {installed: versions[1], accepted: versions[2]};
+}

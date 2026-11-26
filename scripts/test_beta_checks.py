@@ -164,6 +164,7 @@ class ReleaseTests(unittest.TestCase):
             script = root/"scripts"/source.name
             script.parent.mkdir()
             shutil.copyfile(source,script)
+            shutil.copyfile(source.with_name("release_source.py"), script.with_name("release_source.py"))
             cfg = root/"app/src-tauri"
             cfg.mkdir(parents=True)
             (cfg/"tauri.conf.json").write_text('{"version":"test"}')
@@ -174,6 +175,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode,0)
                 self.assertIn("Beta configuration must specify macOS 27.0",result.stderr)
                 self.assertFalse((root/"docs/evidence/phase-7/signed-build/commands.json").exists())
+                self.assertFalse((script.parent/"__pycache__").exists())
 
         self.assertFalse(any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(source.read_text()))))
 

@@ -287,6 +287,9 @@ fn classify_inner(
     // first call (owner, 2026-11-18). A confirmation is checked before any
     // call: one for other settings or skills is refused, not ignored.
     let pi_possible = options.agent == "auto" && config.classification_pi.enabled;
+    let pi_plan = (pi_possible || options.agent == "pi")
+        .then(|| agent_runner::pi::plan_model(vault, &existing, &config.classification_pi));
+    let pi_model = pi_plan.as_ref().and_then(|result| result.as_ref().ok());
     let target_ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
     // The token binds what Pi would receive (owner, 2026-11-19, item 2).
     let digests: BTreeMap<String, String> = targets
@@ -311,14 +314,17 @@ fn classify_inner(
             ));
         }
         Some(token)
-            if *token
-                == pi_confirmation(
-                    &config.classification_pi,
-                    &claude,
-                    options.full,
-                    &pi_skills(&target_ids),
-                )
-                .token =>
+            if pi_model.is_some_and(|model| {
+                *token
+                    == pi_confirmation(
+                        &config.classification_pi,
+                        model,
+                        &claude,
+                        options.full,
+                        &pi_skills(&target_ids),
+                    )
+                    .token
+            }) =>
         {
             true
         }
@@ -376,14 +382,17 @@ fn classify_inner(
         stopped: None,
         providers: providers.clone(),
         auto_approved: None,
-        pi_confirmation: (options.dry_run && pi_possible && !target_ids.is_empty()).then(|| {
-            pi_confirmation(
-                &config.classification_pi,
-                &claude,
-                options.full,
-                &pi_skills(&target_ids),
-            )
-        }),
+        pi_confirmation: pi_model
+            .filter(|_| options.dry_run && pi_possible && !target_ids.is_empty())
+            .map(|model| {
+                pi_confirmation(
+                    &config.classification_pi,
+                    model,
+                    &claude,
+                    options.full,
+                    &pi_skills(&target_ids),
+                )
+            }),
     };
     if options.dry_run && !targets.is_empty() && uses_claude {
         report.warnings.push(
@@ -470,6 +479,7 @@ fn classify_inner(
                 requested,
                 guide: guide.as_deref(),
                 pi: Some(&config.classification_pi),
+                pi_plan: pi_plan.as_ref(),
                 claude: Some(&claude),
                 claude_events: options.claude_events,
             };
@@ -537,7 +547,11 @@ fn classify_inner(
                     .any(|(_, code, _)| skill_failure(code, skill_attempts))
                 && (options.agent == "pi"
                     || (options.agent == "auto" && config.classification_pi.enabled));
-            if try_pi && options.agent == "auto" && !pi_confirmed {
+            if try_pi
+                && options.agent == "auto"
+                && !pi_confirmed
+                && let Some(model) = pi_model
+            {
                 // Ask before the first Pi call: nothing is saved for this
                 // skill or the ones after it until the user confirms.
                 let remaining: Vec<&str> = order
@@ -547,6 +561,7 @@ fn classify_inner(
                     .collect();
                 let confirmation = pi_confirmation(
                     &config.classification_pi,
+                    model,
                     &claude,
                     options.full,
                     &pi_skills(&remaining),
@@ -632,6 +647,7 @@ fn classify_inner(
                         agent: (*agent).into(),
                         reason_code: code.clone(),
                         attempts: skill_attempts,
+                        skipped_at: crate::import::timestamp()?,
                     });
                     if let Some(c) = control {
                         let mut progress = c.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -778,7 +794,11 @@ fn classify_inner(
             proposal_created,
             attempts,
             warnings,
-            reason_code: if provider_classified { None } else { reason_code },
+            reason_code: if provider_classified {
+                None
+            } else {
+                reason_code
+            },
             searched_locations,
             classified_from: metadata.classification.classified_from.clone(),
             estimated_skill_tokens: if estimated_agent_calls > 0 {
@@ -859,6 +879,11 @@ fn classify_inner(
             }
         }
     }
+    if !options.dry_run && crate::classification_history::save(vault, &report).is_err() {
+        report
+            .warnings
+            .push("CLASSIFICATION_HISTORY_NOT_SAVED".into());
+    }
     Ok(report)
 }
 
@@ -906,8 +931,9 @@ pub fn pi_content_digest(raw: &str, files: &[String]) -> String {
 /// digest) to Pi. The token binds every Pi setting, `--full` and each
 /// skill's [`pi_content_digest`], like Claude's confirmed estimate (owner,
 /// 2026-11-19, item 2); ids and settings hold no NUL.
-pub fn pi_confirmation(
+fn pi_confirmation(
     settings: &crate::PiSettings,
+    planned: &agent_runner::pi::ModelPlan,
     claude: &crate::ClaudeSettings,
     full: bool,
     skills: &[(String, String)],
@@ -918,19 +944,20 @@ pub fn pi_confirmation(
     // The model Pi is given, and whether it is Pi's default for the
     // provider (0.3, r5): a different default or a newly chosen model is a
     // different confirmation.
-    let resolved = agent_runner::pi::resolved_model(settings);
-    let model = resolved
-        .as_ref()
-        .map(|resolved| resolved.model.clone())
-        .unwrap_or_default();
-    let model_default = resolved.is_some_and(|resolved| resolved.pi_default);
+    let model = planned.model.model.clone();
+    let model_default = planned.model.pi_default;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"kinana-pi-confirmation-v3\0");
     for part in [
         settings.provider.as_str(),
+        &planned.version,
         &settings.model,
         &model,
-        if model_default { "pi-default" } else { "chosen" },
+        if model_default {
+            "pi-default"
+        } else {
+            "chosen"
+        },
         &settings.thinking,
         &settings.account,
         &claude.model,

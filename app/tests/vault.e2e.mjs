@@ -7,7 +7,7 @@ import path from 'node:path';
 import http from 'node:http';
 const root=fileURLToPath(new URL('../../',import.meta.url));const evidence=process.env.KINANA_UI_EVIDENCE||path.join(root,'docs/evidence/phase-6/batch-4-5');
 const home=process.env.KINANA_UI_HOME;const base=process.env.KINANA_UI_BASE;const vault=path.join(home,'SkillsBox');
-function cli(args){const r=spawnSync(path.join(root,'target/debug/kinana'),['--vault',vault,'--json',...args],{env:{...process.env,HOME:home},encoding:'utf8'});assert.equal(r.status,0,r.stdout+r.stderr);return JSON.parse(r.stdout);}
+function cli(args){const r=spawnSync(process.env.KINANA_TEST_CLI,['--vault',vault,'--json',...args],{env:{...process.env,HOME:home},encoding:'utf8'});assert.equal(r.status,0,r.stdout+r.stderr);return JSON.parse(r.stdout);}
 function tree(dir){return readdirSync(dir).sort().flatMap(name=>{const p=path.join(dir,name);return lstatSync(p).isDirectory()?[[name,tree(p)]]:[[name,createHash('sha256').update(readFileSync(p)).digest('hex')]];});}
 async function invoke(cmd,args={}) {return browser.tauri.execute(async ({core},command,params)=>core.invoke(command,params),cmd,args);}
 async function chooseOption(testId,label){await $(`[data-testid="${testId}"]`).click();const choices=await $$('[role="option"]');for(const choice of choices){if((await choice.getText())===label){await choice.click();return;}}throw new Error(`Missing option: ${label}`);}
@@ -49,12 +49,12 @@ describe('Real file-backed vault — batches 6.4–6.5',()=>{
   await $('[data-testid="toggle-filters"]').click();assert.equal(await $('[data-filter="state"]').isDisplayed(),true);await $('[data-filter="state"]').click();
  });
  it('explains audit levels and estimates classification before any model call or write',async()=>{
-  const levels=path.join(base,'audit-levels');const clean=path.join(levels,'clean');mkdirSync(clean,{recursive:true});writeFileSync(path.join(clean,'SKILL.md'),'---\nname: audit-clean\ndescription: Read a local reference\n---\nA local reference.\n');cpSync(path.join(root,'tests/fixtures/audit/external-network'),path.join(levels,'network'),{recursive:true});cli(['add',levels,'--all','--allow-risky']);
+  const levels=path.join(base,'audit-levels');const clean=path.join(levels,'clean');mkdirSync(clean,{recursive:true});writeFileSync(path.join(clean,'SKILL.md'),'---\nname: audit-clean\ndescription: Read a local reference\n---\nA local reference.\n');cpSync(path.join(root,'tests/fixtures/audit/script-file'),path.join(levels,'script'),{recursive:true});cpSync(path.join(root,'tests/fixtures/audit/destructive-command'),path.join(levels,'destructive'),{recursive:true});cli(['add',levels,'--all','--allow-risky']);
   await browser.refresh();await $('[data-testid="skill-audit-clean"]').waitForDisplayed();
   const audit=await browser.execute(()=>Array.from(document.querySelectorAll('.skill-row [data-audit]')).map(e=>({level:e.dataset.audit,label:e.getAttribute('aria-label'),title:e.title,dot:!!e.querySelector('.audit-dot'),color:e.querySelector('.audit-dot')?getComputedStyle(e.querySelector('.audit-dot')).backgroundColor:null})));
   assert.ok(audit.some(a=>a.level==='clean'));assert.ok(audit.some(a=>a.level==='review'));assert.ok(audit.some(a=>a.level==='risky'));
   for(const a of audit){assert.equal(a.label,a.title);assert.ok(a.title.length>10);if(a.level==='clean')assert.equal(a.dot,false);if(a.level==='review')assert.notEqual(a.color,audit.find(i=>i.level==='risky').color);}writeFileSync(path.join(evidence,'audit-indicators.json'),JSON.stringify(audit,null,2)+'\n');cli(['undo']);await browser.refresh();await browser.waitUntil(async()=>await $('[data-testid="result-count"]').getAttribute('data-count')==='7');await $('[data-testid="classify-emil-color"]').waitForEnabled();
-  const before=tree(vault);await $('[data-testid="classify-emil-color"]').click();await $('[data-testid="classify-estimate"]').waitForDisplayed();
+  const before=tree(vault);await $('[data-testid="skill-emil-color"] .skill-select').click();await $('[data-testid="detail-classify"]').click();await $('[data-testid="classify-estimate"]').waitForDisplayed();
   const preview=await invoke('preview_classify',{id:'emil-color'});const expected=cli(['classify','emil-color','--agent','claude','--dry-run']);assert.deepEqual(preview.estimated_tokens,expected.estimated_tokens);assert.equal(preview.agent_calls,0);
   assert.deepEqual(tree(vault),before);await $('[data-testid="cancel-classify"]').click();assert.deepEqual(tree(vault),before);
   await invoke('start_classify',{id:'emil-color',estimate:preview.estimated_tokens,confirmed:false});await browser.waitUntil(async()=>(await invoke('classify_status')).done);const denied=await invoke('classify_status');assert.equal(denied.error.code,'CLASSIFY_CONFIRMATION_REQUIRED');assert.equal(denied.report,null);await invoke('cancel_classify');assert.deepEqual(tree(vault),before);
@@ -96,15 +96,15 @@ describe('Real file-backed vault — batches 6.4–6.5',()=>{
   await undoUI();await browser.waitUntil(async()=>!!cli(['show','emil-design-foundations']).metadata.proposal);
  });
  it('cancels a prepared local import without modifying the vault or source',async()=>{
-  const before=tree(vault);const original=tree(path.join(root,'tests','fixtures','public-release','skills','emil-color'));
-  await openImport();await $('[data-testid="import-source"]').setValue(path.join(root,'tests','fixtures','public-release','skills','emil-color'));
+  const before=tree(vault);const original=tree(path.join(base,'sources','emil-color'));
+  await openImport();await $('[data-testid="import-source"]').setValue(path.join(base,'sources','emil-color'));
   await $('[data-testid="import-inspect"]').click();await browser.waitUntil(async()=>await $('.import-items').isDisplayed());
   await $('[data-testid="import-inspect"]').click();await $('[data-testid="import-confirm"]').waitForDisplayed();
   const cancel=await $('.import-dialog [data-slot=dialog-footer] button:first-child');await cancel.click();await browser.waitUntil(async()=>!(await $('.import-dialog').isExisting()));
-  assert.deepEqual(tree(vault),before);assert.deepEqual(tree(path.join(root,'tests','fixtures','public-release','skills','emil-color')),original);
+  assert.deepEqual(tree(vault),before);assert.deepEqual(tree(path.join(base,'sources','emil-color')),original);
  });
  it('previews ZIP preparation without writes, then cancels and removes its owned scratch source',async()=>{
-  const archive=path.join(base,'real-color.zip');const r=spawnSync('/usr/bin/zip',['-q',archive,'SKILL.md'],{cwd:path.join(root,'tests','fixtures','public-release','skills','emil-color'),encoding:'utf8'});assert.equal(r.status,0,r.stderr);
+  const archive=path.join(base,'real-color.zip');const r=spawnSync('/usr/bin/zip',['-q',archive,'SKILL.md'],{cwd:path.join(base,'sources','emil-color'),encoding:'utf8'});assert.equal(r.status,0,r.stderr);
   const before=tree(vault);const archiveHash=createHash('sha256').update(readFileSync(archive)).digest('hex');
   const imports=path.join(home,'.kinana/imports');const owned=()=>existsSync(imports)?readdirSync(imports).filter(n=>n.startsWith('source-')):[];const previous=owned();
   await openImport();await $('[data-testid="import-source"]').setValue(archive);await $('[data-testid="import-inspect"]').click();
@@ -142,14 +142,12 @@ describe('Real file-backed vault — batches 6.4–6.5',()=>{
   const permissions=JSON.parse(readFileSync(path.join(root,'app/src-tauri/capabilities/main.json'),'utf8')).permissions;
   assert.ok(!permissions.some(p=>String(p).startsWith('opener:')));
  });
- // Calls the real `claude` CLI on the owner's account: only with
- // KINANA_LIVE_AGENT=1 (owner decision 2026-11-17), otherwise reported as skipped.
- it('classifies a real keyword skill only after the displayed cost is confirmed (needs KINANA_LIVE_AGENT=1)',async function(){if(process.env.KINANA_LIVE_AGENT!=='1'){console.log('SKIPPED: live classification calls the real claude CLI; set KINANA_LIVE_AGENT=1 to run it');this.skip();}this.timeout(180000);
+ it('classifies a keyword skill with the fake provider only after the displayed cost is confirmed',async function(){this.timeout(180000);
   const status=spawnSync('/usr/bin/git',['-C',vault,'-c','core.hooksPath=/dev/null','status','--porcelain=v1'],{env:{...process.env,HOME:home},encoding:'utf8'});writeFileSync(path.join(evidence,'before-ui-classification-git-status.txt'),status.stdout+status.stderr);
   await $('[data-testid="skill-emil-ui-review"] .skill-select').click();await $('[data-testid="detail-classify"]').waitForDisplayed();await $('[data-testid="detail-classify"]').click();await $('[data-testid="classify-estimate"]').waitForDisplayed();
   assert.equal(cli(['show','emil-ui-review']).metadata.classification.classified_by,'keywords');const source=tree(path.join(vault,'skills'));const dist=tree(path.join(vault,'dist'));
   await $('[data-testid="confirm-classify"]').click();await $('[data-testid="classification-result"]').waitForDisplayed({timeout:150000});
-  const result=cli(['show','emil-ui-review']);const text=await $('[data-testid="classification-result"]').getText();const calls=(await invoke('classify_status')).report?.agent_calls;writeFileSync(path.join(evidence,'live-ui-classification.json'),JSON.stringify({agent_calls:calls,classified_by:result.metadata.classification.classified_by,proposal_created:!!result.metadata.proposal,active:result.metadata.description.active,visible_result:text,source_unchanged:JSON.stringify(source)===JSON.stringify(tree(path.join(vault,'skills'))),dist_unchanged:JSON.stringify(dist)===JSON.stringify(tree(path.join(vault,'dist')))},null,2)+'\n');
+  const result=cli(['show','emil-ui-review']);const text=await $('[data-testid="classification-result"]').getText();const trace=readFileSync(path.join(base,'classification-trace.jsonl'),'utf8').trim().split('\n').map(JSON.parse);assert.equal(trace.length,1);assert.equal(trace[0].fixture,true);assert.match(await $('[data-testid="classification-agent-calls"]').getText(),/[1١]/);const calls=trace.length;writeFileSync(path.join(evidence,'fake-ui-classification.json'),JSON.stringify({agent_calls:calls,classified_by:result.metadata.classification.classified_by,proposal_created:!!result.metadata.proposal,active:result.metadata.description.active,visible_result:text,source_unchanged:JSON.stringify(source)===JSON.stringify(tree(path.join(vault,'skills'))),dist_unchanged:JSON.stringify(dist)===JSON.stringify(tree(path.join(vault,'dist')))},null,2)+'\n');
   assert.equal(result.metadata.classification.classified_by,'claude',text);assert.ok(result.metadata.proposal);assert.equal(result.metadata.description.active,'original');assert.deepEqual(tree(path.join(vault,'skills')),source);assert.deepEqual(tree(path.join(vault,'dist')),dist);
   await $('[data-testid="cancel-classify"]').click();await undoUI();await browser.waitUntil(async()=>cli(['show','emil-ui-review']).metadata.classification.classified_by==='keywords');
  });

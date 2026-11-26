@@ -68,6 +68,10 @@ impl Fixture {
 
     /// Like [`Fixture::pi`], with `extra` events after `turn_start`.
     fn pi_with(&self, mode: &str, extra: &Value) {
+        self.pi_with_version("1.5.2", mode, extra);
+    }
+
+    fn pi_with_version(&self, version: &str, mode: &str, extra: &Value) {
         let trace = self.s.root.join("pi-trace.jsonl");
         let marker = self.s.root.join("MUST_NOT_EXIST");
         let script = r#"#!/usr/bin/python3
@@ -76,7 +80,7 @@ mode = @MODE@
 record = {'argv': sys.argv[1:], 'offline': os.environ.get('PI_OFFLINE'), 'package_dir': os.environ.get('PI_PACKAGE_DIR'), 'cwd_entries': os.listdir('.')}
 if sys.argv[1:] == ['--version']:
     with open(@TRACE@, 'a') as f: f.write(json.dumps(record) + '\n')
-    print('1.6.0' if mode == 'version' else '1.5.2')
+    print('1.6.0' if mode == 'version' else @VERSION@)
     sys.exit(0)
 record['stdin'] = sys.stdin.read()
 with open(@TRACE@, 'a') as f: f.write(json.dumps(record) + '\n')
@@ -216,6 +220,7 @@ out({'type': 'agent_settled', 'aborted': False})
 "#
         .replace("@MODE@", &serde_json::to_string(mode).unwrap())
         .replace("@EXTRA@", &serde_json::to_string(&extra.to_string()).unwrap())
+        .replace("@VERSION@", &serde_json::to_string(version).unwrap())
         .replace("@TRACE@", &serde_json::to_string(&trace.to_string_lossy()).unwrap())
         .replace("@MARKER@", &serde_json::to_string(&marker.to_string_lossy()).unwrap())
         .replace("@PROPOSAL@", &serde_json::to_string(PROPOSAL).unwrap());
@@ -227,7 +232,7 @@ out({'type': 'agent_settled', 'aborted': False})
             package.join("package.json"),
             json!({
                 "name": "@earendil-works/pi-coding-agent",
-                "version": if mode == "package_version" { "1.6.0" } else { "1.5.2" }
+                "version": if mode == "package_version" { "1.6.0" } else { version }
             })
             .to_string(),
         )
@@ -868,6 +873,12 @@ fn an_unreviewed_version_gets_no_prompt() {
     );
     assert_eq!(report["agent_calls"], 0);
     assert_eq!(f.prompts(), 0);
+    assert!(
+        report["stopped"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is pending review; accepted versions: 1.5.2, 1.6.1.")
+    );
     assert_eq!(snapshot(&f.s.vault), before);
 }
 
@@ -1551,7 +1562,10 @@ fn pi_default_passes_the_provider_default_and_the_confirmation_binds_it() {
         );
     };
     let default = original
-        .replace("provider = \"test-provider\"", "provider = \"openai-codex\"")
+        .replace(
+            "provider = \"test-provider\"",
+            "provider = \"openai-codex\"",
+        )
         .replace("model = \"test-model\"\n", "");
     assert_ne!(default, original);
     write(&default);
@@ -1579,7 +1593,10 @@ fn pi_default_passes_the_provider_default_and_the_confirmation_binds_it() {
     let (code, refused) = f.run(&["classify", "ui", "--confirm", &token]);
     assert_eq!(code, Some(2), "{refused}");
     assert_eq!(refused["error"]["code"], "PI_CONFIRMATION_CHANGED");
-    assert!(f.calls().is_empty(), "nothing started before a valid confirmation");
+    assert!(
+        f.calls().is_empty(),
+        "nothing started before a valid confirmation"
+    );
     // A run with "Pi default" gives Pi the provider and its default model.
     write(&default);
     let (code, report) = f.run(&["classify", "ui", "--agent", "pi"]);
@@ -1594,4 +1611,169 @@ fn pi_default_passes_the_provider_default_and_the_confirmation_binds_it() {
         .collect::<Vec<_>>();
     assert!(argv.windows(2).any(|w| w == ["--provider", "openai-codex"]));
     assert!(argv.windows(2).any(|w| w == ["--model", "gpt-6.1-sol"]));
+}
+
+#[test]
+fn reviewed_versions_bind_their_own_defaults_before_any_provider_starts() {
+    let versions = ["1.5.2", "1.6.1"];
+    for (provider, models) in [
+        ("azure", ["gpt-6.1-sol", "gpt-6.2-sol"]),
+        ("openai", ["gpt-6.1-sol", "gpt-6.2-sol"]),
+        ("openai-codex", ["gpt-6.1-sol", "gpt-6.2-sol"]),
+        (
+            "mistral",
+            ["devstral-medium-latest", "mistral-medium-latest"],
+        ),
+    ] {
+        let f = Fixture::new(true);
+        let config = f.s.vault.join("box.toml");
+        let original = fs::read_to_string(&config).unwrap();
+        let provider_row = format!("provider = \"{provider}\"");
+        let implicit = original
+            .replace("provider = \"test-provider\"", &provider_row)
+            .replace("model = \"test-model\"\n", "");
+        let save = |text: &str| {
+            fs::write(&config, text).unwrap();
+            assert!(
+                Command::new("git")
+                    .current_dir(&f.s.vault)
+                    .args(["commit", "-qam", "Change fixture provider settings"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        save(&implicit);
+        let preview = || {
+            let (code, report) = f.run(&["classify", "ui", "--dry-run"]);
+            assert_eq!(code, Some(0), "{report}");
+            report["pi_confirmation"].clone()
+        };
+        let mut tokens = vec![];
+        for (version, model) in versions.iter().zip(models) {
+            f.pi_with_version(version, "ok", &json!([]));
+            let confirmation = preview();
+            assert_eq!(confirmation["model"], model);
+            assert_eq!(confirmation["model_default"], true);
+            tokens.push(confirmation["token"].as_str().unwrap().to_owned());
+        }
+        for index in [1, 0] {
+            let (version, model) = (versions[index], models[index]);
+            f.pi_with_version(version, "ok", &json!([]));
+            let before = snapshot(&f.s.vault);
+            let (code, stale) = f.run(&["classify", "ui", "--confirm", &tokens[1 - index]]);
+            assert_eq!(code, Some(2), "{stale}");
+            assert_eq!(stale["error"]["code"], "PI_CONFIRMATION_CHANGED");
+            assert_eq!(snapshot(&f.s.vault), before);
+            let explicit = implicit.replace(
+                &provider_row,
+                &format!("{provider_row}\nmodel = \"{model}\""),
+            );
+            save(&explicit);
+            let (code, stale) = f.run(&["classify", "ui", "--confirm", &tokens[index]]);
+            assert_eq!(code, Some(2), "{stale}");
+            assert_eq!(stale["error"]["code"], "PI_CONFIRMATION_CHANGED");
+            assert!(f.calls().is_empty());
+            save(&implicit);
+        }
+        f.pi_with_version("1.6.1", "ok", &json!([]));
+        let (code, report) = f.run(&["classify", "ui", "--confirm", &tokens[1]]);
+        assert_eq!(code, Some(0), "{report}");
+        let trace = f.calls();
+        let invocation = trace.last().unwrap()["argv"].as_array().unwrap();
+        assert!(
+            invocation
+                .windows(2)
+                .any(|pair| pair == [json!("--provider"), json!(provider)])
+        );
+        assert!(
+            invocation
+                .windows(2)
+                .any(|pair| pair == [json!("--model"), json!(models[1])])
+        );
+    }
+}
+
+#[test]
+fn changing_the_package_after_confirmation_stops_before_pi_starts() {
+    let f = Fixture::new(true);
+    let package = f.s.root.join("pi-package");
+    let alternate = f.s.root.join("alternate");
+    fs::create_dir(&alternate).unwrap();
+    f.pi_with_version("1.6.1", "ok", &json!([]));
+    fs::copy(package.join("dist/cli.js"), alternate.join("cli.js")).unwrap();
+    fs::copy(package.join("package.json"), alternate.join("package.json")).unwrap();
+    fs::copy(f.manifest(), alternate.join("manifest.json")).unwrap();
+    f.pi_with_version("1.5.2", "ok", &json!([]));
+    let token = f.run(&["classify", "ui", "--dry-run"]).1["pi_confirmation"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let script = format!(
+        "#!/usr/bin/python3\nfrom shutil import copyfile\ncopyfile({:?}, {:?})\ncopyfile({:?}, {:?})\ncopyfile({:?}, {:?})\nraise SystemExit(1)\n",
+        alternate.join("cli.js"),
+        package.join("dist/cli.js"),
+        alternate.join("package.json"),
+        package.join("package.json"),
+        alternate.join("manifest.json"),
+        f.manifest()
+    );
+    write_script(&f.bin.join("claude"), &script);
+    let before = snapshot(&f.s.vault);
+    let (code, report) = f.run(&["classify", "ui", "--confirm", &token]);
+    assert_eq!(code, Some(2), "{report}");
+    let providers = report["stopped"]["providers"].as_array().unwrap();
+    assert!(
+        providers
+            .iter()
+            .any(|p| p["agent"] == "pi" && p["reason_code"] == "PI_CONFIRMATION_CHANGED"),
+        "{report}"
+    );
+    assert!(f.calls().is_empty());
+    assert_eq!(snapshot(&f.s.vault), before);
+}
+
+#[test]
+fn candidate_package_checks_refuse_modified_missing_linked_extra_and_mismatched_versions() {
+    for case in ["missing", "changed", "linked", "extra", "mismatch"] {
+        let f = Fixture::new(true);
+        f.pi_with_version(
+            "1.6.1",
+            if case == "mismatch" { "version" } else { "ok" },
+            &json!([]),
+        );
+        let package = f.s.root.join("pi-package");
+        let additional = package.join("dist/data.js");
+        fs::write(&additional, "original fixture").unwrap();
+        let manifest_path = f.manifest();
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["files"]["dist/data.js"] =
+            json!(blake3::hash(b"original fixture").to_hex().to_string());
+        fs::write(manifest_path, manifest.to_string()).unwrap();
+        match case {
+            "missing" => fs::remove_file(&additional).unwrap(),
+            "changed" => fs::write(&additional, "modified").unwrap(),
+            "linked" => {
+                fs::remove_file(&additional).unwrap();
+                let original = f.s.root.join("fixture-data");
+                fs::write(&original, "original fixture").unwrap();
+                std::os::unix::fs::symlink(original, &additional).unwrap();
+            }
+            "extra" => fs::write(package.join("dist/extra.js"), "extra fixture").unwrap(),
+            _ => {}
+        }
+        let (_, report) = f.run(&["classify", "ui", "--agent", "pi"]);
+        assert_eq!(
+            report["stopped"]["providers"][0]["reason_code"],
+            if case == "mismatch" {
+                "AGENT_VERSION_UNVERIFIED"
+            } else {
+                "AGENT_PACKAGE_UNVERIFIED"
+            },
+            "{case}: {report}"
+        );
+        assert_eq!(f.calls().len(), usize::from(case == "mismatch"));
+        assert_eq!(f.prompts(), 0);
+    }
 }

@@ -72,6 +72,7 @@ pub const BRIEF_PAGE_SKILLS_MAX: usize = 50;
 #[derive(Debug, Serialize)]
 pub struct BriefSkill {
     pub id: String,
+    pub audit_level: &'static str,
     pub role: String,
     pub when_to_use: String,
     pub when_not: String,
@@ -83,6 +84,7 @@ pub struct BriefSkill {
 #[derive(Debug, Clone, Serialize)]
 pub struct BriefBundleSkill {
     pub id: String,
+    pub audit_level: &'static str,
     /// The bundle priority: `primary` or `secondary`.
     pub role: String,
 }
@@ -91,6 +93,7 @@ pub struct BriefBundle {
     pub name: String,
     /// How many skills the bundle holds; present in both forms.
     pub members: usize,
+    pub risky_members: usize,
     /// Absent when the page shows bundles by name and member count only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -311,11 +314,23 @@ pub fn brief(
         .skip((page - 1).saturating_mul(limit))
         .take(limit)
         .collect::<Vec<_>>();
+    let all_bundles = crate::bundles::list(vault)?;
+    let bundles_total = all_bundles.len();
+    let levels = crate::activation_risk::levels(
+        vault,
+        chosen.iter().map(|(item, _)| item.skill.id.clone()).chain(
+            all_bundles
+                .iter()
+                .filter(|_| page == 1)
+                .flat_map(|bundle| bundle.skills.iter().map(|member| member.id.clone())),
+        ),
+    );
     let entries = |cap: usize| {
         chosen
             .iter()
             .map(|(item, meta)| BriefSkill {
                 id: item.skill.id.clone(),
+                audit_level: levels[&item.skill.id],
                 role: shortened(&item.skill.role, cap),
                 when_to_use: shortened(&item.skill.when_to_use, cap),
                 // Shown to the reader, and for that reason never part of the index.
@@ -332,14 +347,17 @@ pub fn brief(
     // A bundle is what `use <bundle>` activates as a whole, so its members
     // are listed whole whatever the skill filters are. Bundles are not paged:
     // the first page carries them and later pages do not repeat them.
-    let all_bundles = crate::bundles::list(vault)?;
-    let bundles_total = all_bundles.len();
     let full = all_bundles
         .into_iter()
         .filter(|_| page == 1)
         .map(|bundle| BriefBundle {
             name: printable(&bundle.name),
             members: bundle.skills.len(),
+            risky_members: bundle
+                .skills
+                .iter()
+                .filter(|member| levels[&member.id] == "risky")
+                .count(),
             title: Some(shortened(&bundle.title, BRIEF_TEXT_CHARACTERS)),
             skills: Some(
                 bundle
@@ -347,6 +365,7 @@ pub fn brief(
                     .into_iter()
                     .map(|member| BriefBundleSkill {
                         id: printable(&member.id),
+                        audit_level: levels[&member.id],
                         role: printable(&member.role),
                     })
                     .collect(),

@@ -151,17 +151,17 @@ fn brief_json_has_the_fixed_shape_filters_like_list_and_writes_nothing() {
             "skills": [
                 {"id": "api-review", "role": "Reviews REST API designs",
                  "when_to_use": "Before writing new endpoints", "when_not": "For visual design work",
-                 "description": "Review REST API contracts", "category": "backend-api",
+                 "description": "Review REST API contracts", "category": "backend-api", "audit_level": "risky",
                  "stack": ["node"], "stage": ["design", "review"]},
                 {"id": "form-kit", "role": "Builds forms",
                  "when_to_use": "When adding a form", "when_not": "For native mobile screens",
-                 "description": "Build accessible forms", "category": "web-frontend",
+                 "description": "Build accessible forms", "category": "web-frontend", "audit_level": "risky",
                  "stack": ["react", "next"], "stage": ["build"]},
             ],
             "bundles": [
-                {"name": "web-kit", "members": 2, "title": "Web kit", "skills": [
-                    {"id": "form-kit", "role": "primary"},
-                    {"id": "api-review", "role": "secondary"},
+                {"name": "web-kit", "risky_members": 2, "members": 2, "title": "Web kit", "skills": [
+                    {"id": "form-kit", "role": "primary", "audit_level": "risky"},
+                    {"id": "api-review", "role": "secondary", "audit_level": "risky"},
                 ]},
             ],
             "bundles_total": 1,

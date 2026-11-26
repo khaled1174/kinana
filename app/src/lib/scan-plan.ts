@@ -60,3 +60,17 @@ export function scanSelection(plan:ScanPlan,choice:ScanChoice){
   risky:all.filter(item=>item.audit.level==="risky").length,
  };
 }
+
+export function scanFolder(item: ScanItem): string {
+ return item.path.slice(0,item.path.lastIndexOf("/"))||"/";
+}
+
+export function selectScanFolder(plan: ScanPlan,choice: ScanChoice,folder: string): ScanChoice {
+ const fresh=new Set(plan.fresh.filter(item=>scanFolder(item)===folder).map(item=>item.path));
+ const drift=plan.drifted.filter(item=>scanFolder(item)===folder).map(item=>item.path);
+ return {
+  ...choice,
+  unchecked:choice.unchecked.filter(path=>!fresh.has(path)),
+  drift:[...new Set([...choice.drift,...drift])],
+ };
+}

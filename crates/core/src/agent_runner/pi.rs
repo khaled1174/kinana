@@ -33,7 +33,7 @@ mod manifest;
 
 /// Pi versions whose source was reviewed for the gate above. Any other
 /// version is "not reviewed" and is never given a prompt.
-pub const REVIEWED_VERSIONS: &[&str] = &["1.5.2"];
+pub const REVIEWED_VERSIONS: &[&str] = &[manifest::VERSION_1_5_2, manifest::VERSION_1_6_1];
 
 /// Fixed system prompt: the real instructions travel on stdin with the data.
 pub const SYSTEM_PROMPT: &str = "You classify one coding-agent skill and answer with one JSON object only. You have no tools. Follow the instructions in the user message.";
@@ -54,19 +54,23 @@ pub(super) fn plain(value: &str, limit: usize) -> bool {
 /// a separate argument, never a word Pi reads as a file.
 pub(super) fn model_id(value: &str, limit: usize) -> bool {
     value.len() <= limit
-        && value.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@')
-        })
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
         && !value.starts_with('-')
 }
 
 /// Pi's built-in default model for `provider` in the reviewed version, if it
 /// has one ([`manifest::DEFAULT_MODELS_1_5_2`]).
-pub fn default_model(provider: &str) -> Option<&'static str> {
-    manifest::DEFAULT_MODELS_1_5_2
-        .iter()
-        .find(|(name, _)| *name == provider)
-        .map(|(_, model)| *model)
+fn default_model(version: &str, provider: &str) -> Option<&'static str> {
+    match version {
+        manifest::VERSION_1_5_2 => manifest::DEFAULT_MODELS_1_5_2,
+        manifest::VERSION_1_6_1 => manifest::DEFAULT_MODELS_1_6_1,
+        _ => return None,
+    }
+    .iter()
+    .find(|(name, _)| *name == provider)
+    .map(|(_, model)| *model)
 }
 
 /// The model a run passes to Pi: the one chosen in the settings, or Pi's
@@ -78,14 +82,14 @@ pub struct ResolvedModel {
     pub pi_default: bool,
 }
 
-pub fn resolved_model(settings: &PiSettings) -> Option<ResolvedModel> {
+fn resolved_model(version: &str, settings: &PiSettings) -> Option<ResolvedModel> {
     if !settings.model.is_empty() {
         return Some(ResolvedModel {
             model: settings.model.clone(),
             pi_default: false,
         });
     }
-    default_model(&settings.provider).map(|model| ResolvedModel {
+    default_model(version, &settings.provider).map(|model| ResolvedModel {
         model: model.to_owned(),
         pi_default: true,
     })
@@ -113,7 +117,11 @@ pub fn validate_settings(settings: &PiSettings) -> Result<()> {
             "Pi model: letters, digits and . _ - / : @ only, up to 128",
         ));
     }
-    if settings.enabled && resolved_model(settings).is_none() {
+    if settings.enabled
+        && !REVIEWED_VERSIONS
+            .iter()
+            .any(|version| resolved_model(version, settings).is_some())
+    {
         return Err(invalid(&format!(
             "Pi {} has no default model for provider {}; choose a model",
             REVIEWED_VERSIONS.join(", "),
@@ -136,7 +144,7 @@ pub fn validate_settings(settings: &PiSettings) -> Result<()> {
 /// Every flag the owner required, always, plus `--no-mcp` and the remaining
 /// resource switches. Provider and thinking only when chosen; the model is
 /// the chosen one or Pi's default for the provider ([`resolved_model`]).
-pub fn arguments(settings: &PiSettings) -> Vec<String> {
+fn arguments(settings: &PiSettings, model: &str) -> Vec<String> {
     let mut args = [
         "-p",
         "--mode",
@@ -157,21 +165,14 @@ pub fn arguments(settings: &PiSettings) -> Vec<String> {
     .into_iter()
     .map(str::to_owned)
     .collect::<Vec<_>>();
-    let model = if settings.provider.is_empty() {
-        settings.model.clone()
-    } else {
-        resolved_model(settings)
-            .map(|resolved| resolved.model)
-            .unwrap_or_default()
-    };
     for (flag, value) in [
-        ("--provider", &settings.provider),
-        ("--model", &model),
-        ("--thinking", &settings.thinking),
+        ("--provider", settings.provider.as_str()),
+        ("--model", model),
+        ("--thinking", settings.thinking.as_str()),
     ] {
         if !value.is_empty() {
             args.push(flag.into());
-            args.push(value.clone());
+            args.push(value.into());
         }
     }
     args
@@ -240,11 +241,16 @@ fn pinned(version: &str) -> Option<Pinned> {
         })
         .filter(|p| p.version == version);
     }
-    (version == manifest::VERSION_1_5_2).then(|| Pinned {
+    let files = match version {
+        manifest::VERSION_1_5_2 => manifest::FILES_1_5_2,
+        manifest::VERSION_1_6_1 => manifest::FILES_1_6_1,
+        _ => return None,
+    };
+    Some(Pinned {
         version: version.to_owned(),
         bin: manifest::BIN.to_owned(),
         tree: manifest::TREE.to_owned(),
-        files: manifest::FILES_1_5_2
+        files: files
             .iter()
             .map(|(path, hash)| ((*path).to_owned(), (*hash).to_owned()))
             .collect(),
@@ -1196,6 +1202,7 @@ fn refused(outcome: &mut AgentOutcome, code: &str, message: String) {
 /// program, its private PATH (kept alive with its private directory), an
 /// empty working directory and where Pi's sign-in lock would be.
 pub(super) struct Gate {
+    version: String,
     executable: PathBuf,
     trusted_path: std::ffi::OsString,
     cwd: EmptyDirectory,
@@ -1205,10 +1212,29 @@ pub(super) struct Gate {
 
 /// Why the gate stayed closed: a fixed code, the CLI text, and the places
 /// searched when no trusted program was found.
-pub(super) struct Closed {
+pub(crate) struct Closed {
     pub(super) code: String,
     pub(super) message: String,
     pub(super) searched: Vec<String>,
+}
+
+fn unreviewed_version_message(version: &str) -> Option<String> {
+    let (base, _) = version.split_once(['-', '+']).unwrap_or((version, ""));
+    if version.len() > 40
+        || !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+        || base.split('.').count() != 3
+        || base
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(format!(
+        "Pi {version} is pending review; accepted versions: {}. Pi was given no prompt.",
+        REVIEWED_VERSIONS.join(", ")
+    ))
 }
 
 fn closed(code: &str, message: impl Into<String>) -> Closed {
@@ -1225,12 +1251,22 @@ fn closed(code: &str, message: impl Into<String>) -> Closed {
 /// package files, no `APPEND_SYSTEM.md`, then `pi --version` agreeing with
 /// the package. Shared by classification and the model list (owner,
 /// 2026-11-24: the list uses the same checks).
-pub(super) fn open_gate(
+pub(crate) struct ModelPlan {
+    pub(crate) version: String,
+    pub(crate) model: ResolvedModel,
+}
+
+struct TrustedPi {
+    plan: crate::executables::SearchPlan,
+    lookup: crate::executables::Lookup,
+    excluded: Vec<PathBuf>,
+    executable: PathBuf,
+}
+
+fn trusted_pi(
     vault: &Vault,
     existing: &[crate::SkillRecord],
-    deadline: Instant,
-    control: Option<&crate::classify::ClassifyControl>,
-) -> std::result::Result<Gate, Closed> {
+) -> std::result::Result<TrustedPi, Closed> {
     let Ok(excluded) = excluded_directories(vault, existing) else {
         return Err(closed(
             "AGENT_SOURCE_METADATA_UNREADABLE",
@@ -1251,6 +1287,64 @@ pub(super) fn open_gate(
             )
         });
     };
+    Ok(TrustedPi {
+        plan,
+        lookup,
+        excluded,
+        executable,
+    })
+}
+
+fn reviewed_package(executable: &Path) -> std::result::Result<String, Closed> {
+    verify_package(executable).map_err(|(code, detail)| {
+        closed(code, unreviewed_version_message(&detail).unwrap_or_else(|| format!(
+            "The installed Pi package is not the reviewed one ({detail}). Pi was not started and was sent no text."
+        )))
+    })
+}
+
+pub(crate) fn plan_model(
+    vault: &Vault,
+    existing: &[crate::SkillRecord],
+    settings: &PiSettings,
+) -> std::result::Result<ModelPlan, Closed> {
+    let TrustedPi { executable, .. } = trusted_pi(vault, existing)?;
+    let version = reviewed_package(&executable)?;
+    let model = resolved_model(&version, settings).ok_or_else(|| {
+        closed(
+            "INVALID_PI_SETTINGS",
+            format!(
+                "Pi {version} has no default model for provider {}; choose a model",
+                settings.provider
+            ),
+        )
+    })?;
+    Ok(ModelPlan { version, model })
+}
+
+fn require_same_package(executable: &Path, expected: &str) -> std::result::Result<(), Closed> {
+    if reviewed_package(executable)? != expected {
+        return Err(closed(
+            "PI_CONFIRMATION_CHANGED",
+            "Pi changed after the model was chosen. Preview the selection and confirm again.",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn open_gate(
+    vault: &Vault,
+    existing: &[crate::SkillRecord],
+    deadline: Instant,
+    control: Option<&crate::classify::ClassifyControl>,
+    expected_version: Option<&str>,
+) -> std::result::Result<Gate, Closed> {
+    let TrustedPi {
+        plan,
+        lookup,
+        excluded,
+        executable,
+    } = trusted_pi(vault, existing)?;
     // Pi is `#!/usr/bin/env node`: the same private node directory as Claude.
     let agent_path = match crate::executables::agent_path(
         &plan,
@@ -1275,18 +1369,13 @@ pub(super) fn open_gate(
     };
     // The pinned files first: nothing of an unreviewed package runs, not
     // even its version probe (owner, 2026-11-18).
-    let package = match verify_package(&executable) {
-        Ok(version) => version,
-        Err((code, detail)) => {
-            return Err(closed(
-                code,
-                format!(
-                    "The installed Pi package is not the reviewed one ({}). Pi was not started and was sent no text.",
-                    detail
-                ),
-            ));
-        }
-    };
+    let package = reviewed_package(&executable)?;
+    if expected_version.is_some_and(|version| version != package) {
+        return Err(closed(
+            "PI_CONFIRMATION_CHANGED",
+            "Pi changed after the model was chosen. Preview the selection and confirm again.",
+        ));
+    }
     // Owner, 2026-11-19, item 4: Pi's extra instructions file would add the
     // user's text to every system prompt (the gate refuses its `addendum`
     // section). Checked before Pi is started, so it is sent no text.
@@ -1349,10 +1438,9 @@ pub(super) fn open_gate(
         Some(Err(shown)) => {
             return Err(closed(
                 "AGENT_VERSION_UNVERIFIED",
-                format!(
-                    "Pi {shown} is not a reviewed version ({}). Pi was given no prompt; classify with Claude or keywords.",
-                    REVIEWED_VERSIONS.join(", ")
-                ),
+                unreviewed_version_message(&shown).unwrap_or_else(|| {
+                    "Pi reported an unrecognized version; it was given no prompt.".into()
+                }),
             ));
         }
         None => {
@@ -1369,6 +1457,7 @@ pub(super) fn open_gate(
         ));
     }
     Ok(Gate {
+        version: package,
         executable,
         trusted_path,
         cwd,
@@ -1431,7 +1520,9 @@ pub const LIST_ARGUMENTS: &[&str] = &[
     "--list-models",
 ];
 
-const LIST_HEADER: [&str; 6] = ["provider", "model", "context", "max-out", "thinking", "images"];
+const LIST_HEADER: [&str; 6] = [
+    "provider", "model", "context", "max-out", "thinking", "images",
+];
 
 fn token_count(value: &str) -> bool {
     let digits = value.trim_end_matches(['K', 'M']);
@@ -1439,7 +1530,9 @@ fn token_count(value: &str) -> bool {
         && value.len() - digits.len() <= 1
         && !digits.is_empty()
         && digits.split('.').count() <= 2
-        && digits.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && digits
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn yes_no(value: &str) -> Option<bool> {
@@ -1455,7 +1548,7 @@ fn yes_no(value: &str) -> Option<bool> {
 /// trusted: a row is kept only if every column is in the expected shape.
 /// "No models available" is an empty list; anything else is unreadable
 /// (`None`).
-pub fn parse_model_list(stdout: &str) -> Option<(Vec<PiProvider>, usize)> {
+fn parse_model_list(version: &str, stdout: &str) -> Option<(Vec<PiProvider>, usize)> {
     let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
     let first = lines.next()?;
     if first.starts_with("No models available") {
@@ -1475,18 +1568,20 @@ pub fn parse_model_list(stdout: &str) -> Option<(Vec<PiProvider>, usize)> {
                     && token_count(context)
                     && token_count(max_out) =>
             {
-                yes_no(thinking).zip(yes_no(images)).map(|(thinking, images)| {
-                    (
-                        *provider,
-                        PiModel {
-                            id: (*model).to_owned(),
-                            context: (*context).to_owned(),
-                            max_out: (*max_out).to_owned(),
-                            thinking,
-                            images,
-                        },
-                    )
-                })
+                yes_no(thinking)
+                    .zip(yes_no(images))
+                    .map(|(thinking, images)| {
+                        (
+                            *provider,
+                            PiModel {
+                                id: (*model).to_owned(),
+                                context: (*context).to_owned(),
+                                max_out: (*max_out).to_owned(),
+                                thinking,
+                                images,
+                            },
+                        )
+                    })
             }
             _ => None,
         };
@@ -1500,7 +1595,7 @@ pub fn parse_model_list(stdout: &str) -> Option<(Vec<PiProvider>, usize)> {
                 providers.push(PiProvider {
                     id: provider.to_owned(),
                     models: Vec::new(),
-                    default_model: default_model(provider).map(str::to_owned),
+                    default_model: default_model(version, provider).map(str::to_owned),
                     default_listed: false,
                 });
                 providers.last_mut().expect("just pushed")
@@ -1524,14 +1619,16 @@ pub fn parse_model_list(stdout: &str) -> Option<(Vec<PiProvider>, usize)> {
 pub fn list_models(vault: &Vault) -> Result<PiModelList> {
     let existing = vault.records()?;
     let deadline = Instant::now() + Duration::from_secs(60);
-    let gate =
-        open_gate(vault, &existing, deadline, None).map_err(|c| Error::new(&c.code, c.message))?;
+    let gate = open_gate(vault, &existing, deadline, None, None)
+        .map_err(|c| Error::new(&c.code, c.message))?;
     let Some(timeout) = remaining_timeout(deadline, Duration::from_secs(45)) else {
         return Err(Error::new(
             ProcessFailure::Timeout.code(),
             "Pi's model list timed out.",
         ));
     };
+    require_same_package(&gate.executable, &gate.version)
+        .map_err(|c| Error::new(&c.code, c.message))?;
     let output = run_program(
         &gate.executable,
         &LIST_ARGUMENTS
@@ -1575,9 +1672,10 @@ pub fn list_models(vault: &Vault) -> Result<PiModelList> {
         )
     };
     let text = String::from_utf8(output.stdout).map_err(|_| unreadable())?;
-    let (providers, skipped_rows) = parse_model_list(&text).ok_or_else(unreadable)?;
+    let (providers, skipped_rows) =
+        parse_model_list(&gate.version, &text).ok_or_else(unreadable)?;
     Ok(PiModelList {
-        version: REVIEWED_VERSIONS.join(", "),
+        version: gate.version,
         providers,
         skipped_rows,
     })
@@ -1604,8 +1702,22 @@ pub(super) fn classify_pi(
         refused(&mut outcome, &error.code, error.message);
         return Ok(outcome);
     }
+    let planned = match request.pi_plan {
+        Some(Ok(plan)) => plan,
+        Some(Err(closed)) => {
+            refused(&mut outcome, &closed.code, closed.message.clone());
+            outcome.searched_locations.clone_from(&closed.searched);
+            return Ok(outcome);
+        }
+        None => {
+            return Err(Error::new(
+                "INVALID_PI_SETTINGS",
+                "Pi needs a model chosen from its reviewed package",
+            ));
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(120);
-    let gate = match open_gate(vault, existing, deadline, control) {
+    let gate = match open_gate(vault, existing, deadline, control, Some(&planned.version)) {
         Ok(gate) => gate,
         Err(closed) => {
             refused(&mut outcome, &closed.code, closed.message);
@@ -1613,8 +1725,12 @@ pub(super) fn classify_pi(
             return Ok(outcome);
         }
     };
-    let (executable, trusted_path, cwd, auth_locks) =
-        (&gate.executable, &gate.trusted_path, &gate.cwd, &gate.auth_locks);
+    let (executable, trusted_path, cwd, auth_locks) = (
+        &gate.executable,
+        &gate.trusted_path,
+        &gate.cwd,
+        &gate.auth_locks,
+    );
     let schema = proposal_schema(&allowed).to_string();
     let Ok(prompt) =
         super::classification_prompt(id, raw, files, &allowed, existing, &schema, guide)
@@ -1626,7 +1742,7 @@ pub(super) fn classify_pi(
         );
         return Ok(outcome);
     };
-    let args = arguments(settings);
+    let args = arguments(settings, &planned.model.model);
     for attempt in 1..=2 {
         if !cwd.is_empty() {
             refused(
@@ -1644,6 +1760,10 @@ pub(super) fn classify_pi(
             );
             return Ok(outcome);
         };
+        if let Err(closed) = require_same_package(executable, &planned.version) {
+            refused(&mut outcome, &closed.code, closed.message);
+            return Ok(outcome);
+        }
         outcome.attempts = attempt;
         let output = match run_program(
             executable,
@@ -1785,7 +1905,7 @@ mod tests {
             model: "fake-model".into(),
             ..PiSettings::default()
         };
-        assert_eq!(recorded, arguments(&settings));
+        assert_eq!(recorded, arguments(&settings, &settings.model));
     }
 
     /// One record checked by a fresh gate, after the header unless `first`.
@@ -2415,7 +2535,7 @@ mod tests {
     /// 2a9ab86, L1).
     #[test]
     fn every_required_flag_is_always_passed() {
-        let args = arguments(&PiSettings::default());
+        let args = arguments(&PiSettings::default(), "");
         for flag in [
             "--no-tools",
             "--no-extensions",
@@ -2430,13 +2550,16 @@ mod tests {
         let mode = args.iter().position(|a| a == "--mode").unwrap();
         assert_eq!(args[mode + 1], "json");
         assert!(!args.iter().any(|a| a == "--provider" || a == "--model"));
-        let chosen = arguments(&PiSettings {
-            enabled: true,
-            provider: "openai-codex".into(),
-            model: "gpt-5.5".into(),
-            thinking: "low".into(),
-            account: "subscription".into(),
-        });
+        let chosen = arguments(
+            &PiSettings {
+                enabled: true,
+                provider: "openai-codex".into(),
+                model: "gpt-5.5".into(),
+                thinking: "low".into(),
+                account: "subscription".into(),
+            },
+            "gpt-5.5",
+        );
         assert!(chosen.windows(2).any(|w| w == ["--model", "gpt-5.5"]));
         assert!(chosen.windows(2).any(|w| w == ["--thinking", "low"]));
     }
@@ -2516,14 +2639,17 @@ mod tests {
     /// 1.5.2 refuses `--provider` without `--model`.
     #[test]
     fn pi_default_is_the_reviewed_default_passed_explicitly() {
-        assert_eq!(default_model("openai-codex"), Some("gpt-6.1-sol"));
-        assert_eq!(default_model("anthropic"), Some("claude-opus-5-5"));
-        assert_eq!(default_model("kinana-fake"), None);
+        assert_eq!(default_model("1.5.2", "openai-codex"), Some("gpt-6.1-sol"));
+        assert_eq!(default_model("1.5.2", "anthropic"), Some("claude-opus-5-5"));
+        assert_eq!(default_model("1.5.2", "kinana-fake"), None);
         let table = manifest::DEFAULT_MODELS_1_5_2;
         assert_eq!(table.len(), 42);
         assert!(table.windows(2).all(|w| w[0].0 < w[1].0), "sorted, unique");
         for (provider, model) in table {
-            assert!(plain(provider, 64) && model_id(model, 128), "{provider} {model}");
+            assert!(
+                plain(provider, 64) && model_id(model, 128),
+                "{provider} {model}"
+            );
         }
         let default = PiSettings {
             enabled: true,
@@ -2531,13 +2657,13 @@ mod tests {
             ..PiSettings::default()
         };
         assert_eq!(
-            resolved_model(&default),
+            resolved_model("1.5.2", &default),
             Some(ResolvedModel {
                 model: "gpt-6.1-sol".into(),
                 pi_default: true
             })
         );
-        let args = arguments(&default);
+        let args = arguments(&default, "gpt-6.1-sol");
         assert!(args.windows(2).any(|w| w == ["--provider", "openai-codex"]));
         assert!(args.windows(2).any(|w| w == ["--model", "gpt-6.1-sol"]));
         let chosen = PiSettings {
@@ -2545,7 +2671,7 @@ mod tests {
             ..default
         };
         assert_eq!(
-            resolved_model(&chosen).map(|r| (r.model, r.pi_default)),
+            resolved_model("1.5.2", &chosen).map(|r| (r.model, r.pi_default)),
             Some(("gpt-5.5".into(), false))
         );
     }
@@ -2554,11 +2680,14 @@ mod tests {
     /// isolating switch of a classification.
     #[test]
     fn the_list_command_is_the_gate_without_a_prompt() {
-        let run = arguments(&PiSettings {
-            enabled: true,
-            provider: "openai-codex".into(),
-            ..PiSettings::default()
-        });
+        let run = arguments(
+            &PiSettings {
+                enabled: true,
+                provider: "openai-codex".into(),
+                ..PiSettings::default()
+            },
+            "gpt-6.1-sol",
+        );
         for flag in LIST_ARGUMENTS.iter().filter(|f| **f != "--list-models") {
             assert!(run.iter().any(|a| a == flag), "{flag}");
         }
@@ -2582,13 +2711,17 @@ local          a$(id)                        8K       8K       no        no    \
 local          ok-model                      8K       8K       maybe     no    \n\
 local          ok-model                      8K\n\
 local\u{7}       ok-model                      8K       8K       no        no    \n";
-        let (providers, skipped) = parse_model_list(table).unwrap();
+        let (providers, skipped) = parse_model_list("1.5.2", table).unwrap();
         assert_eq!(skipped, 5);
         let ids = providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids, ["anthropic", "openai-codex", "cloudflare-workers-ai"]);
         let codex = &providers[1];
         assert_eq!(
-            codex.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            codex
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             ["gpt-5.5", "gpt-6.1-sol"],
             "a repeated row is listed once"
         );
@@ -2604,12 +2737,57 @@ local\u{7}       ok-model                      8K       8K       no        no   
         assert!(!providers[2].default_listed, "its default is not listed");
         // Nothing signed in, and output Kinana does not know.
         assert_eq!(
-            parse_model_list("No models available. Use /login or set an API key.\n").unwrap(),
+            parse_model_list(
+                "1.5.2",
+                "No models available. Use /login or set an API key.\n"
+            )
+            .unwrap(),
             (Vec::new(), 0)
         );
-        assert!(parse_model_list("").is_none());
-        assert!(parse_model_list("Error: something\n").is_none());
-        assert!(parse_model_list("provider model context\nx y 1K\n").is_none());
+        assert!(parse_model_list("1.5.2", "").is_none());
+        assert!(parse_model_list("1.5.2", "Error: something\n").is_none());
+        assert!(parse_model_list("1.5.2", "provider model context\nx y 1K\n").is_none());
+    }
+
+    #[test]
+    #[ignore = "requires the isolated C15 package captures in KINANA_PI_REVIEW_DIR"]
+    fn both_published_packages_and_recorded_streams_pass_one_build() {
+        let directory = PathBuf::from(std::env::var_os("KINANA_PI_REVIEW_DIR").unwrap());
+        for &version in REVIEWED_VERSIONS {
+            let bin = directory
+                .join(format!("pinned-only-{version}"))
+                .join(manifest::BIN);
+            assert_eq!(verify_package(&bin).as_deref(), Ok(version));
+            let capture = directory.join(format!("runtime-{version}.json"));
+            let report: Value = serde_json::from_slice(&std::fs::read(capture).unwrap()).unwrap();
+            for attempt in ["first_attempt", "second_attempt"] {
+                let stream = report["logs"][attempt]["stdout"].as_str().unwrap();
+                let header: Value = serde_json::from_str(stream.lines().next().unwrap()).unwrap();
+                let mut gate = PiGate::new(Path::new(header["cwd"].as_str().unwrap()));
+                gate.scan(stream.as_bytes(), true)
+                    .unwrap_or_else(|error| panic!("{version}: {}", error.code()));
+            }
+            let empty = report["logs"]["model_list_without_config"]["stdout"]
+                .as_str()
+                .unwrap();
+            assert_eq!(parse_model_list(version, empty), Some((vec![], 0)));
+            let table = report["logs"]["model_list"]["stdout"].as_str().unwrap();
+            let (providers, skipped) = parse_model_list(version, table).unwrap();
+            assert_eq!(skipped, 0);
+            assert_eq!(providers[0].id, "kinana-fake");
+            for provider in ["azure", "openai", "openai-codex", "mistral"] {
+                let expected = report["checks"]["published_provider_defaults"]["evidence"]
+                    [provider]
+                    .as_str()
+                    .unwrap();
+                let table = format!(
+                    "provider model context max-out thinking images\n{provider} {expected} 32K 4K no no\n"
+                );
+                let (providers, _) = parse_model_list(version, &table).unwrap();
+                assert_eq!(providers[0].default_model.as_deref(), Some(expected));
+                assert!(providers[0].default_listed);
+            }
+        }
     }
 
     #[test]

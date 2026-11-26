@@ -5,26 +5,32 @@ import { CodeNotices } from "./CodeNotices";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "./ui/dialog";
-import { ErrorNotice } from "./common";
+import { Choice, ErrorNotice } from "./common";
 import { reasonText } from "../reasons";
-import { classificationOutcome, itemReason, showProviderDetails, STOPS_THAT_ASK } from "../lib/classification";
+import { classificationOutcome, itemReason, showProviderDetails, STOPS_THAT_ASK, unreviewedPiVersion } from "../lib/classification";
 import { settingsApi } from "../bridge";
+import { settingsMessages } from "../settings-i18n";
 import { piNotes } from "./PiSettings";
 
 export type ClassifySelection =
-  | { id: string; all?: never; pending?: never }
-  | { id?: never; all: true; pending?: never }
-  | { id?: never; all?: never; pending: true };
+  | { id: string; all?: never; pending?: never; importedIds?: never }
+  | { id?: never; all: true; pending?: never; importedIds?: never }
+  | { id?: never; all?: never; pending: true; importedIds?: never }
+  | { id?: never; all?: never; pending?: never; importedIds: string[] };
+
+type BatchAgent = "claude" | "auto" | "keywords" | "pi" | "codex";
 
 type Props = {
+  chooseBatchAgent?: boolean;
   t: Text;
   onClose: () => void;
   onSaved: (report: ClassificationReport) => void;
 } & ClassifySelection;
 
-export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSaved }: Props) {
+export function ClassifyDialog({ id, all: selectAll, pending, importedIds, chooseBatchAgent, t, onClose, onSaved }: Props) {
   const [keywordId, setKeywordId] = useState<string>();
-  const all = !keywordId && (selectAll || pending);
+  const all = !keywordId && (selectAll || pending || !!importedIds);
+  const batchChoice = !!importedIds || !!chooseBatchAgent;
   const [preview, setPreview] = useState<ClassificationReport>();
   const [report, setReport] = useState<ClassificationReport>();
   const [skippedResults, setSkippedResults] = useState<SkippedClassification[]>([]);
@@ -35,15 +41,16 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   const [committing, setCommitting] = useState(false);
   const [stopping, setStopping] = useState(false);
   // The user's explicit choice after Codex was refused or `auto` stopped.
-  const [agent, setAgent] = useState<"claude" | "keywords">();
+  const [agent, setAgent] = useState<BatchAgent>();
   // After a stop: exactly the skills that were not classified.
-  const [remaining, setRemaining] = useState<string[]>();
+  const [remaining, setRemaining] = useState<string[]|undefined>(importedIds);
+  const [piEnabled, setPiEnabled] = useState(false);
   const [piAccount, setPiAccount] = useState("");
   // r5/r6 (owner, 2026-11-24): the saved choice to approve the descriptions
   // of skills that are not risky after the run, and the state of its undo.
   const [autoApprove, setAutoApprove] = useState(true);
   const [showApproved, setShowApproved] = useState(false);
-  const [approvalUndo, setApprovalUndo] = useState<"idle" | "busy" | "done">("idle");
+  const [approvalUndo, setApprovalUndo] = useState<"idle" | "confirming" | "busy" | "done">("idle");
   const [approvalError, setApprovalError] = useState<CoreError>();
   // The Pi confirmation the user accepted after a PI_CONFIRMATION_REQUIRED stop.
   const [piToken, setPiToken] = useState<string>();
@@ -54,7 +61,17 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   // window first sees that skill, so it never runs ahead of core.
   const [current, setCurrent] = useState<{ id: string; since: number }>();
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { void settingsApi.read().then(s => { setPiAccount(s.config?.classification_pi?.account || ""); setAutoApprove(s.config?.auto_approve_descriptions ?? true); }).catch(() => undefined); }, []);
+  useEffect(() => {
+    let active = true;
+    void settingsApi.read().then(s => {
+      if (!active) return;
+      setPiAccount(s.config?.classification_pi?.account || "");
+      setPiEnabled(s.config?.classification_pi?.enabled ?? false);
+      setAutoApprove(s.config?.auto_approve_descriptions ?? true);
+      if (batchChoice) setAgent((s.config?.classification_agent || "claude") as BatchAgent);
+    }).catch(e => { if (active && batchChoice) { setError(asError(e)); setLoading(false); } });
+    return () => { active = false; };
+  }, [batchChoice]);
   // Skills whose description this run approved automatically, until undone.
   const approvedIds = approvalUndo === "done" ? [] : report?.auto_approved?.ids ?? [];
   const approvedLabel = t.locale === "ar" ? "وصف معتمد تلقائيًا (غير مرتفعة المخاطر)" : "Approved automatically (not high risk)";
@@ -74,7 +91,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   };
   async function undoApproval() {
     const approved = report?.auto_approved;
-    if (!approved || !report) return;
+    if (!approved || !report || approvalUndo !== "confirming") return;
     setApprovalUndo("busy");
     setApprovalError(undefined);
     try {
@@ -89,9 +106,10 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   }
 
   useEffect(() => {
+    if (batchChoice && !agent) return;
     let active = true;
     setLoading(true);
-    void api.previewClassify(id, selectAll, agent, remaining, pending).then(value => {
+    void api.previewClassify(id, selectAll, agent, remaining, pending, batchChoice).then(value => {
       if (active) setPreview(value);
     }).catch(e => {
       if (active) setError(asError(e));
@@ -99,7 +117,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
       if (active) setLoading(false);
     });
     return () => { active = false; };
-  }, [id, selectAll, pending, agent, remaining, previewNonce]);
+  }, [id, selectAll, pending, agent, remaining, previewNonce, batchChoice]);
 
   useEffect(() => {
     const id = progress?.current_id;
@@ -163,7 +181,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
     setLoading(true);
     try {
       // The agent the preview used, so a settings change since is refused.
-      await api.startClassify(id, preview.estimated_tokens, selectAll, preview.agent ?? agent, remaining, piToken, pending);
+      await api.startClassify(id, preview.estimated_tokens, selectAll, preview.agent ?? agent, remaining, piToken, pending, batchChoice);
       setRunning(true);
     } catch (e) { setError(asError(e)); }
     finally { setLoading(false); }
@@ -184,7 +202,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   // agent that stopped (Claude from this button too) never becomes keywords.
   const askAgent = error?.code === "AGENT_CODEX_UNSUPPORTED" || error?.code === "AGENT_PI_DISABLED" || error?.code === "PI_CONFIRMATION_CHANGED" || STOPS_THAT_ASK.includes(report?.stopped?.reason_code || "");
   const left = report?.stopped?.remaining;
-  function choose(next: "claude" | "keywords", one?: string) {
+  function choose(next: BatchAgent, one?: string) {
     if (one) {
       setKeywordId(one);
       setRemaining([one]);
@@ -196,6 +214,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
     setReport(undefined);
     setPreview(undefined);
     setProgress(undefined);
+    if(agent===next)setPreviewNonce(n=>n+1);
     setAgent(next);
   }
   // Owner, 2026-11-18: Pi runs under `auto` only after this explicit approval.
@@ -233,23 +252,35 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
   const providerLabel = (name: string) => name === "claude" ? "Claude" : name === "codex" ? "Codex" : name === "pi" ? "Pi" : name;
   const providerStatus = (status: string) => ({ planned: ar ? "سيُستخدم" : "will be used", failed: ar ? "لم ينجح" : "did not succeed", unsupported: ar ? "غير مدعوم للتصنيف" : "not supported for classification", disabled: ar ? "غير مفعّل" : "not enabled", fallback: ar ? "احتياطي إن لم ينجح Claude (تجريبي)" : "fallback if Claude fails (experimental)" } as Record<string, string>)[status] || status;
   const stoppedProviders = report?.stopped?.providers;
+  const piVersion = unreviewedPiVersion(report?.stopped?.message || "", stoppedProviders || []);
   const hasStoppedProviders = !!stoppedProviders?.length;
   const providers = stoppedProviders?.length ? stoppedProviders : preview?.providers || [];
   const providerDetails = showProviderDetails(providers, hasStoppedProviders) && (
     <ul className="classification-providers" data-testid="classification-providers">
       {providers.map(p => <li key={p.agent} data-agent={p.agent} data-status={p.status}>
         <bdi>{providerLabel(p.agent)}</bdi>: {providerStatus(p.status)}
-        {p.reason_code && p.status !== "planned" ? ` — ${p.agent === "pi" ? piReason(p.reason_code, ar) : reasonText(p.reason_code, t.locale)}` : ""}
+        {p.reason_code && p.status !== "planned" && p.reason_code === "AGENT_VERSION_UNVERIFIED" && piVersion && p.agent === "pi"
+          ? <span data-testid="pi-unreviewed-version">{ar ? <> — Pi <bdi>{piVersion.installed}</bdi> قيد المراجعة؛ الإصدار المقبول <bdi>{piVersion.accepted}</bdi>.</> : <> — Pi {piVersion.installed} is pending review. Accepted version: {piVersion.accepted}.</>}</span>
+          : p.reason_code && p.status !== "planned" ? ` — ${p.agent === "pi" ? piReason(p.reason_code, ar) : reasonText(p.reason_code, t.locale)}` : ""}
       </li>)}
     </ul>
   );
   return <Dialog open onOpenChange={value => { if (!value) void close(); }}>
     <DialogContent className="classify-dialog" closeLabel={t.close} showCloseButton={!running}>
       <DialogHeader>
-        <DialogTitle>{pending && all ? t.classifyPending : all ? t.classifyAll : t.classifyTitle}</DialogTitle>
+        <DialogTitle>{importedIds && all ? (ar ? "تصنيف المهارات المستوردة" : "Classify imported skills") : pending && all ? t.classifyPending : all ? t.classifyAll : t.classifyTitle}</DialogTitle>
         <DialogDescription>{keywordId ? (ar ? "ستُصنّف هذه المهارة وحدها بالكلمات المفتاحية عند التأكيد." : "Confirm to classify this skill using keywords.") : pending ? t.classifyPendingExplain : all ? t.classifyAllExplain : t.classifyExplain}</DialogDescription>
       </DialogHeader>
       {all ? <p data-testid="classify-count">{t.skills}: <bdi>{number.format(preview?.selected || 0)}</bdi></p> : <p dir="auto"><strong>{keywordId ?? id}</strong></p>}
+      {batchChoice && !running && !report && !keywordId && <Choice testId="scan-classification-agent"
+        label={settingsMessages[ar ? "ar" : "en"].agent} value={agent || ""}
+        options={[
+          {value:"claude",label:"Claude Code"},
+          {value:"auto",label:settingsMessages[ar ? "ar" : "en"].auto},
+          {value:"pi",label:ar?"Pi — تجريبي":"Pi — experimental",disabled:!piEnabled},
+          {value:"codex",label:settingsMessages[ar ? "ar" : "en"].codex,disabled:true},
+          {value:"keywords",label:settingsMessages[ar ? "ar" : "en"].keywords},
+        ]} onChange={value=>choose(value as BatchAgent)}/>}
       {error && <ErrorNotice error={error} t={t} />}
       {loading && <p role="status">{t.loading}</p>}
       {estimate && <dl className="cost-estimate" data-testid="classify-estimate">
@@ -278,7 +309,7 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
         <div className="button-row"><Button data-testid="pi-confirm" disabled={loading} onClick={continueWithPi}>{ar ? "وافق وصنّف عبر Pi" : "Approve and classify with Pi"}</Button></div>
       </div>}
       {askAgent && !running && <div className="button-row" data-testid="classify-choose-agent">
-        <Button data-testid="classify-with-claude" disabled={loading} onClick={() => choose("claude")}>{left?.length ? (ar ? `صنّف المتبقية (${number.format(left.length)}) عبر Claude` : `Classify the remaining ${left.length} with Claude`) : (ar ? "صنّف عبر Claude" : "Classify with Claude")}</Button>
+        <Button data-testid="classify-with-claude" disabled={loading} onClick={() => choose("claude")}>{piVersion ? (ar ? "استخدم Claude لهذه الدفعة" : "Use Claude for this batch") : left?.length ? (ar ? `صنّف المتبقية (${number.format(left.length)}) عبر Claude` : `Classify the remaining ${left.length} with Claude`) : (ar ? "صنّف عبر Claude" : "Classify with Claude")}</Button>
         <Button variant="outline" data-testid="classify-with-keywords" disabled={loading} onClick={() => choose("keywords")}>{left?.length ? (ar ? `صنّف المتبقية (${number.format(left.length)}) بالكلمات المفتاحية (تقريبي)` : `Classify the remaining ${left.length} with keywords (approximate)`) : (ar ? "صنّف بالكلمات المفتاحية (تقريبي)" : "Classify with keywords (approximate)")}</Button>
       </div>}
       {running && <div className="operation-progress" role="status" data-testid="classify-progress">
@@ -319,15 +350,22 @@ export function ClassifyDialog({ id, all: selectAll, pending, t, onClose, onSave
       </div>}
       {report?.auto_approved && <div role="status" className="notice auto-approval" data-testid="auto-approval" data-state={approvalUndo}>
         {approvalUndo === "done"
-          ? <p data-testid="auto-approval-undone">{ar ? `تراجعتُ عن الاعتماد التلقائي؛ عادت ${number.format(report.auto_approved.ids.length)} من الأوصاف تنتظر مراجعتك.` : `The automatic approval was undone; ${report.auto_approved.ids.length} description${report.auto_approved.ids.length === 1 ? "" : "s"} wait for your review again.`}</p>
+          ? <p data-testid="auto-approval-undone">{ar ? `تم التراجع عن الاعتماد التلقائي. عادت ${number.format(report.auto_approved.ids.length)} من الأوصاف تنتظر مراجعتك.` : `The automatic approval was undone; ${report.auto_approved.ids.length} description${report.auto_approved.ids.length === 1 ? "" : "s"} wait for your review again.`}</p>
           : <p className="auto-approval-line"><span data-testid="auto-approval-count" data-count={report.auto_approved.ids.length}>{approvedCount(report.auto_approved.ids.length)}</span>
             {" · "}<Button variant="link" size="sm" data-testid="auto-approval-show" aria-expanded={showApproved} onClick={() => setShowApproved(v => !v)}>{ar ? "عرض" : "Show"}</Button>
-            {" · "}<Button variant="link" size="sm" data-testid="auto-approval-undo" disabled={approvalUndo === "busy"} onClick={() => void undoApproval()}>{ar ? "تراجع" : "Undo"}</Button></p>}
+            {" · "}<Button variant="link" size="sm" data-testid="auto-approval-undo" disabled={approvalUndo !== "idle"} onClick={() => { setApprovalError(undefined); setApprovalUndo("confirming"); }}>{ar ? "تراجع" : "Undo"}</Button></p>}
+        {approvalUndo === "confirming" && <div data-testid="auto-approval-confirmation">
+          <p>{ar ? `سيعود ${number.format(report.auto_approved.ids.length)} من الأوصاف إلى انتظار المراجعة.` : `Descriptions that will return to review: ${number.format(report.auto_approved.ids.length)}.`}</p>
+          <div className="button-row">
+            <Button variant="outline" size="sm" data-testid="cancel-auto-approval-undo" onClick={() => setApprovalUndo("idle")}>{t.cancel}</Button>
+            <Button size="sm" data-testid="confirm-auto-approval-undo" onClick={() => void undoApproval()}>{ar ? "تأكيد التراجع" : "Confirm undo"}</Button>
+          </div>
+        </div>}
         {showApproved && approvalUndo !== "done" && <ul className="classification-items" data-testid="auto-approval-list">{report.auto_approved.ids.map(item => <li key={item}><bdi dir="auto" className="item-name" title={item}>{item}</bdi><span className="item-reason">{approvedLabel}</span></li>)}</ul>}
         {approvalError && <ErrorNotice error={approvalError} t={t} />}
       </div>}
       <DialogFooter>
-        <Button variant="outline" data-testid="cancel-classify" disabled={loading || (running && (committing || stopping))} onClick={() => void close()}>{report ? t.close : t.cancel}</Button>
+        <Button variant="outline" data-testid="cancel-classify" disabled={(loading && !batchChoice) || (running && (committing || stopping))} onClick={() => void close()}>{report ? t.close : batchChoice&&!running ? (ar?"تخطَّ التصنيف":"Skip classification") : t.cancel}</Button>
         {preview && !report && <Button data-testid="confirm-classify" disabled={loading || running || !preview.selected} onClick={() => void start()}>{t.confirmClassify}</Button>}
       </DialogFooter>
     </DialogContent>

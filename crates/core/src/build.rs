@@ -60,22 +60,22 @@ pub(crate) fn activation_cache_overrides(
     let mut payloads = BTreeMap::new();
     let mut changed = BTreeMap::new();
     for id in ids {
-        let entries = if let Some(change) = plan.changes.iter().find(|change| change.id == *id) {
+        let payload = if let Some(change) = plan.changes.iter().find(|change| change.id == *id) {
             changed.insert(id.clone(), change.before.clone());
-            change.payload.clone()
-        } else {
-            let mut entries = Vec::new();
-            read_payload(&plan.dist.join(id), Path::new(""), &mut entries)?;
-            entries.sort_by(|left, right| left.relative.cmp(&right.relative));
-            entries
-        };
-        payloads.insert(
-            id.clone(),
             ActivationPayload {
-                content_hash: payload_hash(&entries),
-                entries,
-            },
-        );
+                content_hash: payload_hash(&change.payload),
+                entries: change.payload.clone(),
+            }
+        } else {
+            let payload = source_payload(&plan.dist.join(id))?;
+            if plan.generations.get(id) != Some(&payload.generation_hash()) {
+                return Err(conflict(
+                    "The reusable cache no longer matches the prepared source",
+                ));
+            }
+            payload
+        };
+        payloads.insert(id.clone(), payload);
     }
     Ok(ActivationCache {
         payloads,
@@ -166,6 +166,7 @@ struct Change {
     payload: Vec<PayloadEntry>,
     backed_up: bool,
     installed: bool,
+    risky: bool,
 }
 
 struct Plan {
@@ -173,6 +174,7 @@ struct Plan {
     manifest_before: Option<Vec<u8>>,
     manifest_after: Option<Vec<u8>>,
     observed: BTreeMap<String, Option<String>>,
+    generations: BTreeMap<String, String>,
     changes: Vec<Change>,
     report: BuildReport,
 }
@@ -180,6 +182,7 @@ struct Plan {
 /// A prepared cache update. Until `finish`, dropping it restores its own changes.
 /// Paths and staged bytes are owned, so callers can commit metadata independently.
 pub struct BuildTransaction {
+    vault: Vault,
     _state_guard: crate::state::WriteGuard,
     plan: Plan,
     stage: Option<PathBuf>,
@@ -216,6 +219,7 @@ pub fn build_command(vault: &Vault, ids: &[String], dry_run: bool) -> Result<Bui
         leftovers.retain(|id, _| ids.contains(id));
     }
     let mut plan = plan_skipping(vault, ids, &BTreeMap::new(), &BTreeMap::new(), &leftovers)?;
+    private_stages(vault, &plan)?;
     let names = leftover_names(&leftovers);
     let mut report = if dry_run {
         plan.report.dry_run = true;
@@ -296,7 +300,21 @@ pub(crate) fn remove_finder_leftovers(vault: &Vault, leftovers: &FinderLeftovers
 
 /// The undo pre-check, with Finder leftovers left out of each skill's hash.
 pub(crate) fn preview_skipping(vault: &Vault, leftovers: &FinderLeftovers) -> Result<()> {
-    plan_skipping(vault, &[], &BTreeMap::new(), &BTreeMap::new(), leftovers).map(|_| ())
+    let plan = plan_skipping(vault, &[], &BTreeMap::new(), &BTreeMap::new(), leftovers)?;
+    private_stages(vault, &plan)
+}
+
+fn private_stages(vault: &Vault, plan: &Plan) -> Result<()> {
+    let home = crate::activation_risk::local_home();
+    for change in plan.changes.iter().filter(|change| change.risky) {
+        crate::activation_risk::require_private_stage(
+            vault,
+            &plan.dist.join(&change.id),
+            home.as_deref(),
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// Validate and describe the complete update without creating even staging files.
@@ -306,6 +324,7 @@ pub fn preview(
     overrides: &BTreeMap<String, SkillMetadata>,
 ) -> Result<BuildReport> {
     let mut plan = plan(vault, ids, overrides)?;
+    private_stages(vault, &plan)?;
     plan.report.dry_run = true;
     Ok(plan.report)
 }
@@ -317,7 +336,9 @@ pub fn prepare(
     overrides: &BTreeMap<String, SkillMetadata>,
 ) -> Result<BuildTransaction> {
     let plan = plan(vault, ids, overrides)?;
+    private_stages(vault, &plan)?;
     let mut transaction = BuildTransaction {
+        vault: vault.clone(),
         _state_guard: crate::state::write_guard(&vault.index_path, false)?,
         plan,
         stage: None,
@@ -344,6 +365,7 @@ pub fn prepare(
     let stage = create_stage(&dist)?;
     transaction.stage_identity = Some(fs::symlink_metadata(&stage)?);
     transaction.stage = Some(stage.clone());
+    transaction.require_actual_private_stage()?;
     create_private_directory(&stage.join("new"))?;
     create_private_directory(&stage.join("old"))?;
     for change in &transaction.plan.changes {
@@ -364,6 +386,20 @@ pub fn prepare(
 }
 
 impl BuildTransaction {
+    fn require_actual_private_stage(&self) -> Result<()> {
+        if let Some(stage) = &self.stage
+            && self.plan.changes.iter().any(|change| change.risky)
+        {
+            crate::activation_risk::require_private_stage(
+                &self.vault,
+                stage,
+                crate::activation_risk::local_home().as_deref(),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn report(&self) -> &BuildReport {
         &self.plan.report
     }
@@ -384,6 +420,8 @@ impl BuildTransaction {
     }
 
     fn apply_inner(&mut self) -> Result<()> {
+        private_stages(&self.vault, &self.plan)?;
+        self.require_actual_private_stage()?;
         require_optional_directory(&self.plan.dist)?;
         if read_manifest_bytes(&self.plan.dist)? != self.plan.manifest_before {
             return Err(conflict(
@@ -601,6 +639,7 @@ fn plan_skipping(
     let mut report = BuildReport::default();
     let mut changes = Vec::new();
     let mut observed = BTreeMap::new();
+    let mut generations = BTreeMap::new();
     for id in &selected {
         let source = require_directory(sources.get(id).unwrap_or(&source_root.join(id)))?;
         let metadata_path = index::validate_path(&meta_root.join(format!("{id}.toml")))?;
@@ -632,73 +671,30 @@ fn plan_skipping(
                 format!("Original skill hash differs from metadata: {id}"),
             ));
         }
-        let skill = payload
-            .iter_mut()
-            .find(|entry| entry.relative == Path::new("SKILL.md"))
-            .and_then(|entry| entry.bytes.as_mut())
-            .ok_or_else(|| {
-                Error::new(
-                    "INVALID_FRONTMATTER",
-                    format!("Missing regular SKILL.md: {id}"),
-                )
-            })?;
-        let text = std::str::from_utf8(skill)
-            .map_err(|error| Error::new("INVALID_FRONTMATTER", error.to_string()))?;
-        frontmatter::parse_skill(text)?;
-        match metadata.description.active.as_str() {
-            "original" => {}
-            "improved" => {
-                let description = metadata
-                    .description
-                    .improved
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty() && value.chars().count() <= 1024)
-                    .ok_or_else(|| {
-                        Error::new(
-                            "INVALID_METADATA",
-                            format!("Approved description must contain 1–1024 characters: {id}"),
-                        )
-                    })?;
-                if metadata
-                    .description
-                    .approved_at
-                    .as_ref()
-                    .is_none_or(|value| value.trim().is_empty())
-                {
-                    return Err(Error::new(
-                        "INVALID_METADATA",
-                        format!("Active improved description has no approval: {id}"),
-                    ));
-                }
-                *skill = replace_description(text, description)?.into_bytes();
-            }
-            _ => {
-                return Err(Error::new(
-                    "INVALID_METADATA",
-                    format!("Unknown active description: {id}"),
-                ));
-            }
-        }
-        let digest = payload_hash(&payload);
+        apply_description(&mut payload, &metadata, id)?;
+        let payload = ActivationPayload {
+            content_hash: payload_hash(&payload),
+            entries: payload,
+        };
         let target = dist.join(id);
         let before = target_state(&target, ownership.generated.get(id).map(String::as_str))?;
         observed.insert(id.clone(), before.clone());
-        let changed = before.as_deref() != Some(digest.as_str())
-            || (before.is_some()
-                && ActivationPayload {
-                    entries: payload.clone(),
-                    content_hash: digest.clone(),
-                }
-                .generation_hash()
-                    != source_payload(&target)?.generation_hash());
+        let generation = payload.generation_hash();
+        let changed = before.as_deref() != Some(payload.content_hash.as_str())
+            || (before.is_some() && generation != source_payload(&target)?.generation_hash());
+        let digest = payload.content_hash.clone();
+        generations.insert(id.clone(), generation);
         if changed {
+            let risky = crate::activation_risk::for_payload(id, "skill", &metadata.audit, &payload)
+                .is_some();
             changes.push(Change {
                 id: id.clone(),
                 before,
                 after: Some(digest.clone()),
-                payload,
+                payload: payload.entries,
                 backed_up: false,
                 installed: false,
+                risky,
             });
         }
         ownership.generated.insert(id.clone(), digest);
@@ -730,6 +726,7 @@ fn plan_skipping(
                     payload: Vec::new(),
                     backed_up: false,
                     installed: false,
+                    risky: false,
                 });
             }
             ownership.generated.remove(&id);
@@ -749,9 +746,81 @@ fn plan_skipping(
         manifest_before,
         manifest_after,
         observed,
+        generations,
         changes,
         report,
     })
+}
+
+pub(crate) fn described_source_payload(
+    path: &Path,
+    meta: &SkillMetadata,
+) -> Result<ActivationPayload> {
+    let mut payload = source_payload(path)?;
+    if payload.content_hash != meta.content_hash {
+        return Err(Error::new(
+            "SOURCE_HASH_MISMATCH",
+            "Original skill hash differs from metadata",
+        ));
+    }
+    apply_description(&mut payload.entries, meta, &meta.id)?;
+    payload.content_hash = payload_hash(&payload.entries);
+    Ok(payload)
+}
+
+fn apply_description(
+    payload: &mut [PayloadEntry],
+    metadata: &SkillMetadata,
+    id: &str,
+) -> Result<()> {
+    let skill = payload
+        .iter_mut()
+        .find(|entry| entry.relative == Path::new("SKILL.md"))
+        .and_then(|entry| entry.bytes.as_mut())
+        .ok_or_else(|| {
+            Error::new(
+                "INVALID_FRONTMATTER",
+                format!("Missing regular SKILL.md: {id}"),
+            )
+        })?;
+    let text = std::str::from_utf8(skill)
+        .map_err(|error| Error::new("INVALID_FRONTMATTER", error.to_string()))?;
+    frontmatter::parse_skill(text)?;
+    match metadata.description.active.as_str() {
+        "original" => {}
+        "improved" => {
+            let description = metadata
+                .description
+                .improved
+                .as_deref()
+                .filter(|value| !value.trim().is_empty() && value.chars().count() <= 1024)
+                .ok_or_else(|| {
+                    Error::new(
+                        "INVALID_METADATA",
+                        format!("Approved description must contain 1–1024 characters: {id}"),
+                    )
+                })?;
+            if metadata
+                .description
+                .approved_at
+                .as_ref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(Error::new(
+                    "INVALID_METADATA",
+                    format!("Active improved description has no approval: {id}"),
+                ));
+            }
+            *skill = replace_description(text, description)?.into_bytes();
+        }
+        _ => {
+            return Err(Error::new(
+                "INVALID_METADATA",
+                format!("Unknown active description: {id}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn source_payload(path: &Path) -> Result<ActivationPayload> {
@@ -1287,6 +1356,11 @@ pub(crate) fn refresh_manual_cache(vault: &Vault, ids: &[String]) -> Result<()> 
         if writes.is_empty() {
             continue;
         }
+        let guarded = crate::activation_risk::guard_cache_writes(
+            vault,
+            &writes,
+            crate::activation_risk::level(vault, id) == "risky",
+        )?;
         let mut observations = vec![];
         for path in [
             vault.root.join("skills").join(id),
@@ -1300,8 +1374,16 @@ pub(crate) fn refresh_manual_cache(vault: &Vault, ids: &[String]) -> Result<()> 
             .map(|p| fs::symlink_metadata(&p).map(|m| (p, m)))
             .collect::<std::io::Result<Vec<_>>>()?;
         tx::preflight(&writes, &observations, &anchors)?;
-        let mut transaction = ActivationTransaction::prepare(writes, observations, anchors)?;
-        if let Err(error) = transaction.apply().and_then(|_| transaction.verify()) {
+        let check_stage = |target: &Path, stage: &Path| {
+            crate::activation_risk::check_cache_stage(vault, &guarded, target, stage)
+        };
+        let mut transaction =
+            ActivationTransaction::prepare_guarded(writes, observations, anchors, &check_stage)?;
+        if let Err(error) = crate::activation_risk::recheck_cache_writes(vault, &guarded)
+            .and_then(|()| transaction.verify_staging(&check_stage))
+            .and_then(|()| transaction.apply())
+            .and_then(|_| transaction.verify())
+        {
             return Err(transaction.abort(error));
         }
         let warnings = transaction.finish();

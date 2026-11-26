@@ -364,8 +364,9 @@ fn run(args: &Args) -> Result<u8> {
             agent,
             mode,
             include_secondary,
+            confirm,
         } => {
-            let report = kinana_core::activate::activate(
+            let report = kinana_core::activate::activate_cli(
                 &vault,
                 &kinana_core::ActivateOptions {
                     selections: selections.clone(),
@@ -376,6 +377,8 @@ fn run(args: &Args) -> Result<u8> {
                     include_secondary: include_secondary.clone(),
                     dry_run: args.dry_run,
                 },
+                confirm.as_deref(),
+                args.dry_run,
             )?;
             let mut text = format!(
                 "{} {} activation(s) in {}",
@@ -953,15 +956,15 @@ fn run(args: &Args) -> Result<u8> {
                 output::emit(&report, args.json, &bundle_text(&report))?;
             }
             BundleCommands::List => {
-                let report = kinana_core::bundles::list(&vault)?;
+                let report = kinana_core::bundles::views(&vault, kinana_core::bundles::list(&vault)?);
                 let text = report
                     .iter()
                     .map(|bundle| {
                         format!(
-                            "{}\t{}\t{} skills",
+                            "{}\t{}\t{} skills ({} risky)",
                             bundle.name,
                             bundle.title,
-                            bundle.skills.len()
+                            bundle.skills.len(), bundle.risky_members
                         )
                     })
                     .collect::<Vec<_>>()
@@ -969,7 +972,7 @@ fn run(args: &Args) -> Result<u8> {
                 output::emit(&report, args.json, &text)?;
             }
             BundleCommands::Show { name } => {
-                let report = kinana_core::bundles::read(&vault, name)?;
+                let report = kinana_core::bundles::views(&vault, vec![kinana_core::bundles::read(&vault, name)?]).remove(0);
                 let mut text = format!(
                     "{} — {}\nAgents: {}",
                     report.name,
@@ -978,10 +981,10 @@ fn run(args: &Args) -> Result<u8> {
                 );
                 for skill in &report.skills {
                     text.push_str(&format!(
-                        "\n{}\t{}\t{}",
-                        skill.id,
-                        skill.role,
-                        skill.group.as_deref().unwrap_or("")
+                        "\n{}\t{}\t{}\t{}",
+                        skill.member.id,
+                        skill.member.role,
+                        skill.member.group.as_deref().unwrap_or(""), skill.audit_level
                     ));
                 }
                 output::emit(&report, args.json, &text)?;

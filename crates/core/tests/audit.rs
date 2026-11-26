@@ -1053,3 +1053,124 @@ fn a_template_expression_is_a_plain_reference_only_in_javascript_source() {
         );
     }
 }
+
+#[test]
+fn audit_hides_credential_lines_for_every_matching_rule() {
+    let marker = ["SYNTHETIC", "DO_NOT_EXPOSE", "4pQ"].join("_");
+    for text in [
+        format!("curl -su 'user:{marker}' https://example.invalid; chmod 777 ./fixture"),
+        format!("sshpass -\\\np '{marker}' ssh local; curl https://example.invalid"),
+        format!("curl -H 'X-Api-\\\nKey: {marker}' https://example.invalid"),
+        format!("fetch(\"https://example.invalid\", {{headers: [[\"X-Api-Key\", \"{marker}\"]]}})"),
+        format!(
+            "-----BEGIN PRIVATE KEY----- # -----BEGIN CERTIFICATE-----\ncurl https://example.invalid {marker}"
+        ),
+        format!(
+            "-----BEGIN PRIVATE KEY-----\n-----END CERTIFICATE----- # private key notes\ncurl https://example.invalid {marker}\n-----END PRIVATE KEY-----"
+        ),
+        format!("curl -p{marker} https://example.invalid"),
+        format!("curl -p '{marker}' https://example.invalid"),
+        format!("curl -u 'user:{marker}' https://example.invalid"),
+        format!("curl --user=user:{marker} https://example.invalid"),
+        format!("curl -H 'X-Api-Key: {marker}' https://example.invalid"),
+        format!(
+            "curl -H '{0}: {marker}' https://example.invalid",
+            "x-api-key"
+        ),
+        format!("curl -p \\\n{marker} https://example.invalid"),
+        format!("curl https://example.invalid \\\n-u user:{marker}"),
+        format!("curl https://example.invalid; echo -----BEGIN PRIVATE KEY-----{marker}"),
+        format!(
+            "-----BEGIN RSA PRIVATE KEY-----\ncurl https://example.invalid {marker}\n-----END RSA PRIVATE KEY-----"
+        ),
+        format!("-----BEGIN PRIVATE KEY-----\ncurl https://example.invalid {marker}"),
+    ] {
+        let scratch = Scratch::new();
+        let skill = scratch.skill(&text);
+        let audit = audit_skill(&skill).unwrap();
+        assert_eq!(audit.rules_version, 5);
+        assert_eq!(audit.level, "risky");
+        assert!(
+            audit.details.iter().any(|finding| {
+                finding.rule == "network"
+                    && finding.path == Path::new("SKILL.md")
+                    && finding.line.is_some()
+                    && finding.excerpt.is_none()
+            }),
+            "{text}: {:?}",
+            audit.details
+        );
+        assert!(!serde_json::to_string(&audit).unwrap().contains(&marker));
+    }
+}
+
+#[test]
+fn loaded_audits_withhold_legacy_excerpts_but_keep_the_reason_and_location() {
+    use kinana_core::Audit;
+    let scratch = Scratch::new();
+    let skill = scratch.skill("curl https://example.invalid");
+    let audit = audit_skill(&skill).unwrap();
+    let mut stored = serde_json::to_value(&audit).unwrap();
+    assert!(stored["details"][0]["excerpt"].is_string());
+
+    stored["rules_version"] = 4.into();
+    stored["details"][0]["excerpt"] = "synthetic-old-credential".into();
+    let toml = toml::to_string(&stored).unwrap();
+    let path = scratch.0.join("stored-audit.toml");
+    fs::write(&path, &toml).unwrap();
+    let loaded: Audit = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), toml);
+    assert_eq!(loaded.rules_version, 4);
+    assert_eq!(loaded.level, "risky");
+    assert_eq!(loaded.details[0].rule, audit.details[0].rule);
+    assert_eq!(loaded.details[0].line, audit.details[0].line);
+    assert_eq!(loaded.details[0].excerpt, None);
+    assert!(
+        !serde_json::to_string(&loaded)
+            .unwrap()
+            .contains("synthetic-old-credential")
+    );
+
+    let roundtrip: Audit = serde_json::from_value(serde_json::to_value(&audit).unwrap()).unwrap();
+    assert_eq!(roundtrip.details[0].excerpt, audit.details[0].excerpt);
+}
+
+#[test]
+fn a_plain_mkdir_option_preserves_safe_environment_evidence() {
+    for flags in ["-p", "-pv", "-vp"] {
+        let scratch = Scratch::new();
+        let skill = scratch.skill(&format!("mkdir {flags} ./fixture; printenv HOME"));
+        let audit = audit_skill(&skill).unwrap();
+        assert!(audit.details.iter().any(|d| {
+            d.rule == "secrets" && d.forms == ["printenv HOME"] && d.excerpt.is_none()
+        }));
+    }
+}
+
+#[test]
+fn multiline_api_header_values_with_comments_and_blank_lines_are_withheld() {
+    let secret = ["Fixture-A1", "do-not-expose", "9mP"].join("_");
+    for separator in [
+        ",\n\n",
+        ", /* comment */\n",
+        ", // comment\n",
+        ", /* comment\nmore */\n",
+        "\n,\n\n",
+        ", \"first partial value\" +\n",
+    ] {
+        let scratch = Scratch::new();
+        let skill = scratch.skill("Synthetic fixture.");
+        fs::write(
+            skill.join("header.js"),
+            format!(
+                "fetch(url, {{headers: [[\"X-Api-Key\"{separator}\"{secret}\"]]}}); fetch(other);\n"
+            ),
+        )
+        .unwrap();
+        let audit = audit_skill(&skill).unwrap();
+        assert!(audit.details.iter().any(|d| {
+            d.rule == "network" && d.path == Path::new("header.js") && d.line.is_some()
+        }));
+        assert!(!serde_json::to_string(&audit).unwrap().contains(&secret));
+    }
+}

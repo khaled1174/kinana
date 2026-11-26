@@ -8,6 +8,11 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+import sys
+
+# Import the local helper without writing into the source checkout.
+sys.dont_write_bytecode = True
+from release_source import manifest_source, verify_recorded_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -19,6 +24,11 @@ parser.add_argument('--manifest', type=Path, default=ROOT / 'docs/evidence/phase
 args = parser.parse_args()
 target, evidence = args.target_dir.resolve(), args.evidence.resolve()
 previous = json.loads(args.manifest.read_text())
+built = json.loads(Path(previous['signed_build_manifest']).read_text())
+source_provenance = manifest_source(previous, 'source_build_revision', verify_recorded_snapshot(built))
+if previous['frozen_source'] != built['frozen_source']:
+    raise SystemExit('The packaging toolchain must come from the build snapshot')
+build_source = Path(built['frozen_source'])
 source = Path(previous['app'])
 info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())
 output = target / 'artifacts' / f"Kinana-{info['CFBundleShortVersionString']}-beta-arm64.dmg"
@@ -58,17 +68,17 @@ def run(name, argv):
 
 # Tauri's bundle command recreates .app. Use its unchanged embedded DMG script
 # directly so that the input signature and already-stapled ticket are preserved.
-version = json.loads((ROOT / 'app/node_modules/@tauri-apps/cli/package.json').read_text())['version']
+version = json.loads((build_source / 'app/node_modules/@tauri-apps/cli/package.json').read_text())['version']
 if version != '2.12.4':
     raise SystemExit('Review the embedded DMG resources before using a different Tauri version')
-cli = ROOT / 'app/node_modules/@tauri-apps/cli-darwin-arm64/cli.darwin-arm64.node'
+cli = build_source / 'app/node_modules/@tauri-apps/cli-darwin-arm64/cli.darwin-arm64.node'
 binary = cli.read_bytes()
 resources = [
     ('bundle_dmg', b'#!/usr/bin/env bash\n# Copyright 2019-2024 Tauri', 19299, 'dce473d510339f1a3f8009d84191ad2bf716d8cdbe12eb6e1f821771cf8f960f', 'bin/bundle_dmg.sh'),
     ('template.applescript', b'on run (volumeName)\n', 1828, '13727c7930c50be639a1eb191e893f1ebc72c270268d4611391b41410a3e862a', 'share/create-dmg/support/template.applescript'),
     ('eula-resources-template.xml', b'<?xml version="1.0" encoding="UTF-8"?>\n', 2376, '7d61d948ba7f118306d61107fead78f04e3338585e2ec729abb65d5d2e21012d', 'share/create-dmg/support/eula-resources-template.xml'),
 ]
-provenance = {'tauri_version': version, 'installed_cli': str(cli), 'installed_cli_sha256': sha(cli), 'resources': []}
+tool_provenance = {'tauri_version': version, 'installed_cli': str(cli), 'installed_cli_sha256': sha(cli), 'resources': []}
 for name, marker, length, expected, relative in resources:
     offset = binary.find(marker)
     while offset >= 0 and hashlib.sha256(binary[offset:offset + length]).hexdigest() != expected:
@@ -80,9 +90,9 @@ for name, marker, length, expected, relative in resources:
     destination.write_bytes(binary[offset:offset + length])
     if name == 'bundle_dmg':
         destination.chmod(0o755)
-    provenance['resources'].append({'name': name, 'offset': offset, 'bytes': length, 'sha256': expected,
+    tool_provenance['resources'].append({'name': name, 'offset': offset, 'bytes': length, 'sha256': expected,
         'primary_source': 'https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/macos/dmg/' + name})
-(evidence / 'tauri-tool-provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+(evidence / 'tauri-tool-provenance.json').write_text(json.dumps(tool_provenance, indent=2) + '\n')
 stage = target / 'source'
 stage.mkdir()
 app = stage / 'Kinana.app'
@@ -102,6 +112,7 @@ run('sign-dmg', ['/usr/bin/codesign', '--force', '--timestamp', '--sign', args.i
 run('verify-dmg-signature', ['/usr/bin/codesign', '--verify', '--strict', '--verbose=4', output])
 run('display-dmg-signature', ['/usr/bin/codesign', '-dvvv', output])
 manifest = {'source_app': str(source), 'source_build_revision': previous['source_build_revision'],
+    'source_provenance': source_provenance, 'notarized_app_manifest': str(args.manifest.resolve()),
     'dmg': str(output), 'signed_dmg_sha256_before_notarization': sha(output),
     'source_tree_sha256': hashlib.sha256(json.dumps(before, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
     'bundle_file_sha256': before, 'source_app_unchanged': True, 'rebuild_performed': False,

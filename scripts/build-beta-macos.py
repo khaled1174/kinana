@@ -17,80 +17,112 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
+
+# Import the local helper without writing into the source checkout.
+sys.dont_write_bytecode = True
+from release_source import reject_external_inputs, sha, snapshot, verify_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--identity', required=True, help='Existing Developer ID Application name or SHA-1')
-parser.add_argument('--evidence', type=Path, default=ROOT / 'docs/evidence/phase-7/signed-build')
+mode = parser.add_mutually_exclusive_group(required=True)
+mode.add_argument('--identity', help='Existing Developer ID Application name or SHA-1')
+mode.add_argument('--verify-unsigned', action='store_true', help='Build and verify without signing identities')
+parser.add_argument('--node-dir', type=Path, default=ROOT / '.tools/node-v22.23.5-darwin-arm64/bin',
+                    help='Directory of the release Node and npm toolchain')
+parser.add_argument('--evidence', type=Path, help='Evidence directory (defaults to <target-dir>/evidence)')
 parser.add_argument('--target-dir', type=Path, default=ROOT / 'target/phase7-beta', help='Fresh candidate build directory')
 args = parser.parse_args()
 target = args.target_dir.resolve()
-base_config = json.loads((ROOT / 'app/src-tauri/tauri.conf.json').read_text())
-candidate_version = base_config['version']
-for name in [f'Kinana-{candidate_version}-beta-arm64.zip']:
-    if (target / 'artifacts' / name).exists():
-        parser.error('An existing candidate is preserved; use --target-dir with a fresh directory')
-evidence = args.evidence.resolve()
-evidence.mkdir(parents=True, exist_ok=True)
-env = os.environ.copy()
-# Tauri must never discover ambient notary credentials during this build.
-for key in list(env):
-    if key.startswith(('APPLE_', 'TAURI_SIGNING_', 'KINANA_E2E_', 'SKILLSBOX_E2E_')):
-        del env[key]
-# The oldest macOS the beta is actually tested on (owner, round 15): the app,
-# the CLI and Info.plist all name it, and no older system is claimed.
+evidence = (args.evidence or target / 'evidence').resolve()
+checkout = ROOT
+# Validate configuration read-only before collecting any signing evidence.
 MINIMUM_MACOS = '27.0'
-if not (json.loads((ROOT / 'app/src-tauri/tauri.beta.conf.json').read_text())['bundle']['macOS']['minimumSystemVersion'] == MINIMUM_MACOS):
+if json.loads((checkout / 'app/src-tauri/tauri.beta.conf.json').read_text())['bundle']['macOS']['minimumSystemVersion'] != MINIMUM_MACOS:
     raise SystemExit('Beta configuration must specify macOS 27.0')
-env.update(CARGO_TARGET_DIR=str(target), MACOSX_DEPLOYMENT_TARGET=MINIMUM_MACOS)
+if os.path.lexists(args.target_dir) or target == checkout:
+    parser.error('An existing candidate is preserved; use a fresh --target-dir')
+if (evidence.is_relative_to(target / 'source') or evidence.is_relative_to(target / 'cargo')
+        or evidence in {target / 'home', target / 'tmp'}):
+    parser.error('Evidence must be outside the source and build inputs')
+cargo_home = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))).resolve()
+node_dir = args.node_dir.resolve()
+node, npm = node_dir / 'node', node_dir / 'npm'
+target.mkdir(parents=True, mode=0o700)
+ROOT = target / 'source'
+try:
+    reject_external_inputs(checkout, cargo_home)
+    reject_external_inputs(target, cargo_home)
+    provenance, source_files = snapshot(checkout, ROOT)
+except (ValueError, subprocess.CalledProcessError) as error:
+    raise SystemExit(str(error)) from error
+build_home = target / 'home'
+build_tmp = target / 'tmp'
+build_home.mkdir(mode=0o700)
+build_tmp.mkdir(mode=0o700)
+env = {
+    'PATH': str(node_dir) + ':' + str(cargo_home / 'bin') + ':/usr/bin:/bin:/usr/sbin:/sbin',
+    'HOME': str(build_home), 'TMPDIR': str(build_tmp) + '/', 'LC_ALL': 'en_US.UTF-8',
+    'CARGO_HOME': str(cargo_home), 'CARGO_TARGET_DIR': str(target / 'cargo'),
+    'RUSTUP_HOME': str(Path.home() / '.rustup'), 'MACOSX_DEPLOYMENT_TARGET': MINIMUM_MACOS,
+    'npm_config_userconfig': str(build_home / 'user.npmrc'),
+    'npm_config_globalconfig': str(build_home / 'global.npmrc'),
+    'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+}
+cargo = cargo_home / 'bin/cargo'
+expected_node = 'v' + (ROOT / '.node-version').read_text().strip().removeprefix('v')
+if subprocess.check_output([node, '--version'], env=env, text=True).strip() != expected_node:
+    raise SystemExit(f'Release requires Node {expected_node}')
+if not npm.resolve().is_relative_to(node_dir.parent):
+    raise SystemExit('npm must come from the same Node distribution')
+evidence.mkdir(parents=True, exist_ok=True)
+(evidence / 'release-source.json').write_text(json.dumps(provenance, indent=2) + '\n')
+(evidence / 'release-source-files.json').write_text(json.dumps(source_files, indent=2) + '\n')
 account = pwd.getpwuid(os.getuid())
 home = Path(account.pw_dir).resolve()
-cargo_home = Path(env.get("CARGO_HOME", str(Path.home() / ".cargo"))).resolve()
 prefixes = {home: "/home/build", Path.home().resolve(): "/home/build",
             cargo_home: "/cargo", ROOT: "/src/kinana", target: "/build/kinana"}
 # rustc uses the last matching prefix. Apply more specific mappings last.
 prefixes = sorted(prefixes.items(), key=lambda item: len(item[0].parts))
-rustflags = env.get("CARGO_ENCODED_RUSTFLAGS", "").split("\x1f")
-if not rustflags[0]:
-    rustflags = shlex.split(env.get("RUSTFLAGS", ""))
-rustflags.extend(f"--remap-path-prefix={path}={replacement}" for path, replacement in prefixes)
+rustflags = [f"--remap-path-prefix={path}={replacement}" for path, replacement in prefixes]
 env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(rustflags)
-cflags = shlex.split(env.get("CFLAGS", ""))
-cflags.extend(f"-ffile-prefix-map={path}={replacement}" for path, replacement in prefixes)
+cflags = [f"-ffile-prefix-map={path}={replacement}" for path, replacement in prefixes]
 env["CFLAGS"] = shlex.join(cflags)
 commands = []
 
-def run(name, argv):
+def run(name, argv, *, sign=False):
     start = datetime.datetime.now(datetime.timezone.utc).isoformat()
     print(name, flush=True)
+    command_env = {**env, "HOME": str(home)} if sign else env
     with (evidence / (name + '.txt')).open('wb') as log:
-        result = subprocess.run([str(v) for v in argv], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        result = subprocess.run([str(v) for v in argv], cwd=ROOT, env=command_env, stdout=log, stderr=subprocess.STDOUT)
     commands.append(dict(name=name, argv=[str(v) for v in argv], started_at=start, exit_code=result.returncode))
     (evidence / 'commands.json').write_text(json.dumps(commands, indent=2) + '\n')
     if result.returncode:
         raise SystemExit(f'{name} failed ({result.returncode}); see {evidence / (name + ".txt")}')
     return (evidence / (name + '.txt')).read_text(errors='replace')
 
-def sha(path):
-    with path.open('rb') as f:
-        return hashlib.file_digest(f, 'sha256').hexdigest()
+if args.identity:
+    identities = run('identities', ['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'], sign=True)
+    allowed = re.findall(r'([A-F0-9]{40}) "(Developer ID Application: [^"\n]+)"', identities)
+    if not any(args.identity in pair for pair in allowed):
+        raise SystemExit('The selected identity is not an existing valid Developer ID Application identity')
 
-identities = run('identities', ['/usr/bin/security', 'find-identity', '-v', '-p', 'codesigning'])
-allowed = re.findall(r'([A-F0-9]{40}) "(Developer ID Application: [^"\n]+)"', identities)
-if not any(args.identity in pair for pair in allowed):
-    raise SystemExit('The selected identity is not an existing valid Developer ID Application identity')
+run('npm-ci', [npm, '--prefix', 'app', 'ci', '--no-audit', '--no-fund'])
+verify_snapshot(ROOT, source_files, generated=True)
 # The CLI first: Tauri copies binaries/kinana-<target triple> into the bundle.
-run('cli-build', ['cargo', 'build', '--release', '--locked', '--target', 'aarch64-apple-darwin', '-p', 'kinana', '--bin', 'kinana'])
-cli_binary = target / 'aarch64-apple-darwin/release/kinana'
+run('cli-build', [cargo, 'build', '--release', '--locked', '--target', 'aarch64-apple-darwin', '-p', 'kinana', '--bin', 'kinana'])
+cli_binary = target / 'cargo/aarch64-apple-darwin/release/kinana'
 if not (subprocess.check_output(['/usr/bin/lipo', '-archs', cli_binary], text=True).strip() == 'arm64'):
     raise SystemExit("Release verification failed: subprocess.check_output(['/usr/bin/lipo', '-archs', cli_binary], text=True).strip() == 'arm64'")
 sidecar = ROOT / 'app/src-tauri/binaries/kinana-aarch64-apple-darwin'
 sidecar.parent.mkdir(exist_ok=True)
 shutil.copy2(cli_binary, sidecar)
-run('native-build', [ROOT / 'scripts/with-node.sh', 'npm', '--prefix', 'app', 'run', 'tauri', '--',
+run('native-build', [npm, '--prefix', 'app', 'run', 'tauri', '--',
                      'build', '--target', 'aarch64-apple-darwin', '--bundles', 'app',
                      '--config', 'src-tauri/tauri.beta.conf.json', '--no-sign', '--', '--locked'])
-app = target / 'aarch64-apple-darwin/release/bundle/macos/Kinana.app'
+verify_snapshot(ROOT, source_files, generated=True)
+app = target / 'cargo/aarch64-apple-darwin/release/bundle/macos/Kinana.app'
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 if not (info['CFBundleIdentifier'] == 'io.github.khaled1174.kinana'):
     raise SystemExit("Release verification failed: info['CFBundleIdentifier'] == 'io.github.khaled1174.kinana'")
@@ -134,12 +166,23 @@ for binary in (executable, bundled_cli):
 (evidence / "binary-privacy.json").write_text(json.dumps(privacy, indent=2) + "\n")
 if any(count for matches in privacy.values() for count in matches.values()):
     raise SystemExit("Personal path or username in release binary strings; see binary-privacy.json")
+if args.verify_unsigned:
+    unsigned = {
+        'revision': provenance['revision'], 'source_provenance': provenance, 'app': str(app),
+        'frontend_sha256': {str(p.relative_to(ROOT / 'app/dist')): sha(p)
+                            for p in sorted((ROOT / 'app/dist').rglob('*')) if p.is_file()},
+        'desktop_sha256': sha(executable), 'cli_sha256': sha(bundled_cli),
+        'same_cli_as_cargo': sha(bundled_cli) == sha(cli_binary),
+    }
+    (evidence / 'unsigned-build.json').write_text(json.dumps(unsigned, indent=2) + '\n')
+    raise SystemExit(0)
+
 # Inside out: the CLI, then the app that seals it.
-run('sign-cli', ['/usr/bin/codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.identity, bundled_cli])
+run('sign-cli', ['/usr/bin/codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.identity, bundled_cli], sign=True)
 details = run('signature-cli', ['/usr/bin/codesign', '-dvvv', bundled_cli])
 if not ('Developer ID Application:' in details and 'runtime' in details and 'Timestamp=' in details):
     raise SystemExit("Release verification failed: 'Developer ID Application:' in details and 'runtime' in details and 'Timestamp=' in details")
-run('sign-app', ['/usr/bin/codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.identity, app])
+run('sign-app', ['/usr/bin/codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.identity, app], sign=True)
 run('verify-app', ['/usr/bin/codesign', '--verify', '--deep', '--strict', '--verbose=4', app])
 details = run('signature-app', ['/usr/bin/codesign', '-dvvv', app])
 if not ('Developer ID Application:' in details and 'runtime' in details and 'Timestamp=' in details):
@@ -157,7 +200,9 @@ if not (not app_zip.exists()):
     raise SystemExit('Preserve an existing candidate; choose a fresh build directory')
 run('archive-app', ['/usr/bin/ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', app, app_zip])
 manifest = {
-    'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+    'revision': provenance['revision'], 'source_provenance': provenance,
+    'frozen_source': str(ROOT),
+    'source_file_manifest': str(evidence / 'release-source-files.json'),
     'target': 'aarch64-apple-darwin', 'minimum_macos_candidate': MINIMUM_MACOS,
     'bundle_id': info['CFBundleIdentifier'], 'app': str(app), 'executable': str(executable),
     'developer_id_signed': True, 'hardened_runtime': True, 'secure_timestamp': True,

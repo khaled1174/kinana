@@ -264,6 +264,7 @@ impl Default for Description {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "StoredAudit")]
 pub struct Audit {
     #[serde(default)]
     pub rules_version: u32,
@@ -274,6 +275,34 @@ pub struct Audit {
     #[serde(default)]
     pub findings: Vec<String>,
 }
+#[derive(Deserialize)]
+struct StoredAudit {
+    #[serde(default)]
+    rules_version: u32,
+    #[serde(default)]
+    details: Vec<AuditFinding>,
+    #[serde(default = "unscanned")]
+    level: String,
+    #[serde(default)]
+    findings: Vec<String>,
+}
+
+impl From<StoredAudit> for Audit {
+    fn from(mut stored: StoredAudit) -> Self {
+        if stored.rules_version < crate::audit::REDACTED_EXCERPTS_VERSION {
+            for finding in &mut stored.details {
+                finding.excerpt = None;
+            }
+        }
+        Self {
+            rules_version: stored.rules_version,
+            details: stored.details,
+            level: stored.level,
+            findings: stored.findings,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditFinding {
     pub rule: String,
@@ -553,6 +582,7 @@ pub struct SuggestMatch {
 #[derive(Debug, Serialize)]
 pub struct SuggestedBundle {
     pub bundle: Bundle,
+    pub risky_members: usize,
     pub matched_categories: Vec<String>,
     pub match_count: usize,
 }
@@ -709,12 +739,16 @@ pub struct ImportOptions {
     pub primary: Vec<String>,
     /// Desktop confirmation, keyed by the exact paths displayed in the preview.
     pub reviewed: Option<std::collections::BTreeMap<PathBuf, (String, String)>>,
+    /// User-approved descriptions for new vault copies in a desktop scan.
+    pub descriptions: std::collections::BTreeMap<PathBuf, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportItem {
     #[serde(skip)]
     pub review_token: Option<String>,
+    #[serde(skip)]
+    pub description: Option<String>,
     pub id: Option<String>,
     pub name: Option<String>,
     pub path: PathBuf,
@@ -858,6 +892,8 @@ pub struct SkippedClassification {
     pub agent: String,
     pub reason_code: String,
     pub attempts: usize,
+    #[serde(skip)]
+    pub(crate) skipped_at: String,
 }
 
 /// Opt-in diagnostics. Neither prompt nor response text is retained.
@@ -1207,6 +1243,8 @@ pub struct ActivationReport {
     pub lock: ProjectLock,
     pub gitignore_suggestions: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_token: Option<String>,
 }
 
 fn automatic_invocation() -> String {
